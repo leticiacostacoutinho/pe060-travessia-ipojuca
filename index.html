@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PE-060 · Travessia Urbana de Ipojuca — Modelo 3D interativo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:rgba(14,20,28,.78);--bg2:rgba(255,255,255,.06);--ln:rgba(255,255,255,.12);--tx:#eef2f6;--mu:#9fb0c2;--ac:#2fb8a6;--ac2:#f2b233;--rd:#e5533d}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;background:#0b0f14;font-family:Inter,system-ui,sans-serif;color:var(--tx);font-size:13px}
+canvas#c{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none}
+.glass{background:var(--bg);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border:1px solid var(--ln);border-radius:12px}
+#top{position:fixed;left:12px;top:12px;padding:10px 14px;max-width:min(560px,calc(100vw - 24px))}
+#top h1{margin:0;font-size:15px;font-weight:700;letter-spacing:.2px}
+#top p{margin:2px 0 0;color:var(--mu);font-size:11.5px}
+#phaseBar{position:fixed;left:50%;transform:translateX(-50%);top:12px;display:flex;gap:4px;padding:4px}
+#phaseBar button{min-width:96px}
+button{font:inherit;color:var(--tx);background:var(--bg2);border:1px solid var(--ln);border-radius:8px;padding:6px 10px;cursor:pointer;transition:background .15s,border-color .15s}
+button:hover{background:rgba(255,255,255,.12)}
+button.on{background:var(--ac);border-color:var(--ac);color:#04201c;font-weight:600}
+#phaseBar button.on[data-phase="hoje"]{background:#c7663c;border-color:#c7663c;color:#fff}
+#phaseBar button.on[data-phase="obra"]{background:var(--ac2);border-color:var(--ac2);color:#2a1d00}
+#panel{position:fixed;right:12px;top:12px;bottom:64px;width:300px;overflow:auto;padding:12px}
+#panel::-webkit-scrollbar{width:6px}#panel::-webkit-scrollbar-thumb{background:#33424f;border-radius:3px}
+.sec{border-top:1px solid var(--ln);padding:10px 0 4px}
+.sec:first-child{border-top:0;padding-top:0}
+.sec h3{margin:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--mu);font-weight:600}
+.row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}
+.row button{flex:1 1 auto;padding:5px 8px;font-size:12px}
+.sl{display:grid;grid-template-columns:86px 1fr 54px;align-items:center;gap:6px;margin:6px 0}
+.sl label{color:var(--mu);font-size:12px}.sl output{text-align:right;font-variant-numeric:tabular-nums;font-size:12px}
+input[type=range]{width:100%;accent-color:var(--ac)}
+select{width:100%;font:inherit;color:var(--tx);background:#18212b;border:1px solid var(--ln);border-radius:6px;padding:4px}
+.tg{display:flex;align-items:center;justify-content:space-between;margin:5px 0;font-size:12.5px}
+.sw{position:relative;width:34px;height:19px;background:#33424f;border-radius:10px;cursor:pointer;flex:none;transition:background .15s}
+.sw::after{content:"";position:absolute;left:2px;top:2px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left .15s}
+.sw.on{background:var(--ac)}.sw.on::after{left:17px}
+#bottom{position:fixed;left:50%;transform:translateX(-50%);bottom:12px;display:flex;gap:6px;padding:5px;flex-wrap:wrap;justify-content:center;max-width:calc(100vw - 24px)}
+#bottom button{padding:7px 12px;font-weight:500}
+#bottom button.pri{background:var(--ac);border-color:var(--ac);color:#04201c;font-weight:600}
+#hud{position:fixed;left:12px;bottom:64px;padding:10px 12px;min-width:236px;font-size:12px}
+#hud .k{color:var(--mu)}#hud .v{font-weight:600;font-variant-numeric:tabular-nums}
+#hud .g{display:grid;grid-template-columns:1fr auto;gap:3px 14px}
+#hud .big{font-size:20px;font-weight:700;margin-bottom:4px}
+#sigchip{margin-top:6px;display:flex;gap:6px;align-items:center;font-size:11.5px}
+.dot{width:10px;height:10px;border-radius:50%;display:inline-block;background:#555}
+#labels{position:fixed;inset:0;pointer-events:none;overflow:hidden}
+.lbl{position:absolute;transform:translate(-50%,-100%);background:rgba(10,16,22,.82);border:1px solid rgba(255,255,255,.18);color:#fff;padding:4px 8px;border-radius:6px;font-size:11.5px;white-space:nowrap;font-weight:500}
+.lbl::after{content:"";position:absolute;left:50%;bottom:-7px;width:1px;height:7px;background:rgba(255,255,255,.6)}
+.lbl.w{border-color:#e5533d}.lbl.p{border-color:#2fb8a6}.lbl.o{border-color:#f2b233}
+.modal{position:fixed;inset:0;background:rgba(3,6,10,.66);display:none;align-items:center;justify-content:center;z-index:20;padding:18px}
+.modal.show{display:flex}
+.mbox{width:min(1200px,100%);max-height:100%;display:flex;flex-direction:column;overflow:hidden}
+.mhead{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--ln);flex-wrap:wrap}
+.mhead h2{margin:0 auto 0 0;font-size:14px}
+.mbody{padding:12px;overflow:auto}
+#planSvgWrap{background:#f4f1ea;border-radius:8px;overflow:hidden;height:min(62vh,640px);cursor:grab;touch-action:none}
+#planSvgWrap svg{width:100%;height:100%;display:block}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:8px;color:var(--mu);font-size:11.5px}
+.legend i{display:inline-block;width:14px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+table.q{border-collapse:collapse;width:100%;font-size:12.5px}
+table.q td,table.q th{border-bottom:1px solid var(--ln);padding:6px 8px;text-align:left}
+table.q td:last-child,table.q th:last-child{text-align:right;font-variant-numeric:tabular-nums}
+.note{color:var(--mu);font-size:11.5px;margin-top:8px;line-height:1.45}
+.refs{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.refs figure{margin:0;background:var(--bg2);border:1px solid var(--ln);border-radius:8px;overflow:hidden}
+.refs img{width:100%;display:block;max-height:340px;object-fit:cover;background:#000}
+.refs figcaption{padding:8px 10px;font-size:12px;color:var(--mu)}
+.refs figcaption b{color:var(--tx);display:block;margin-bottom:2px}
+.refs figcaption button{margin-top:6px}
+#pres{position:fixed;left:50%;transform:translateX(-50%);bottom:64px;width:min(720px,calc(100vw - 24px));padding:14px 16px;display:none;z-index:10}
+#pres.show{display:block}
+#pres .st{color:var(--ac);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.8px}
+#pres h2{margin:3px 0 6px;font-size:18px}
+#pres .tx{color:#d7dee6;line-height:1.5;font-size:13px}
+#pres .tx ul{margin:6px 0 0 18px;padding:0}
+#pres .nav{display:flex;gap:6px;margin-top:10px;align-items:center}
+#pres .prog{flex:1;height:4px;background:#26323d;border-radius:2px;overflow:hidden}
+#pres .prog div{height:100%;background:var(--ac);width:0}
+#loading{position:fixed;inset:0;background:#0b0f14;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:50;gap:10px;color:var(--mu)}
+#loading b{color:var(--tx);font-size:16px}
+#loading .bar{width:220px;height:4px;background:#1f2a35;border-radius:2px;overflow:hidden}
+#loading .bar div{height:100%;width:30%;background:var(--ac);animation:ld 1.2s infinite ease-in-out}
+@keyframes ld{0%{margin-left:-30%}100%{margin-left:100%}}
+#panelToggle{display:none;position:fixed;right:12px;top:12px;z-index:5}
+#shotImg{max-width:100%;max-height:70vh;display:block;margin:0 auto;border-radius:6px}
+#qrBox{display:flex;gap:18px;align-items:center;flex-wrap:wrap;justify-content:center}
+#qrBox img{width:260px;height:260px;background:#fff;border-radius:8px;padding:10px}
+.tab.on{background:var(--ac);color:#04201c;border-color:var(--ac);font-weight:600}
+@media (max-width:860px){
+  #panel{top:auto;bottom:64px;right:8px;left:8px;width:auto;max-height:46vh;display:none;z-index:6}
+  #panel.open{display:block}
+  #panelToggle{display:block}
+  #hud{display:none}
+  #phaseBar{top:auto;bottom:62px}
+  #top{max-width:calc(100vw - 110px)}
+  #top p{display:none}
+  #phaseBar button{min-width:72px}
+}
+</style>
+<script>window.QR_URL="https://leticiacostacoutinho.github.io/pe060-travessia-ipojuca/";</script>
+<script type="importmap">{"imports":{"three":"./lib/three.module.min.js","three/addons/":"./lib/"}}</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="labels"></div>
+
+<div id="top" class="glass">
+  <h1>PE-060 · Travessia Urbana de Ipojuca/PE</h1>
+  <p>Modelo 3D conceitual · Hoje → Obra → Operação · Programa Rodovias Resilientes (DER-PE / Banco Mundial)</p>
+</div>
+
+<div id="phaseBar" class="glass">
+  <button data-phase="hoje">Hoje</button>
+  <button data-phase="obra">Obra</button>
+  <button data-phase="op">Operação</button>
+</div>
+
+<button id="panelToggle" class="glass">☰ Controles</button>
+<div id="panel" class="glass">
+  <div class="sec" id="secObra">
+    <h3>Avanço da obra</h3>
+    <div class="sl"><label>Execução</label><input id="prog" type="range" min="0" max="1" step="0.01" value="0.45"><output id="progV">45%</output></div>
+  </div>
+  <div class="sec">
+    <h3>Camadas</h3>
+    <div class="tg">Rótulos técnicos<div class="sw on" id="tLabels"></div></div>
+    <div class="tg">Pessoas, carros e bicicletas<div class="sw on" id="tAgents"></div></div>
+    <div class="tg">Animar o dia<div class="sw" id="tAnim"></div></div>
+  </div>
+  <div class="sec">
+    <h3>Tempo</h3>
+    <div class="sl"><label>Hora</label><input id="hour" type="range" min="0" max="23.95" step="0.05" value="9.5"><output id="hourV">09:30</output></div>
+    <div class="sl"><label>Mês</label><select id="month"></select><output></output></div>
+    <div class="sl"><label>Vel. do dia</label><input id="daySpeed" type="range" min="0.05" max="2" step="0.05" value="0.35"><output id="daySpeedV">0,35 h/s</output></div>
+  </div>
+  <div class="sec">
+    <h3>Clima</h3>
+    <div class="row" id="weatherRow">
+      <button data-w="sol">☀️ Sol</button><button data-w="nublado">⛅ Nublado</button><button data-w="chuva">🌧️ Chuva</button><button data-w="tempestade">⛈️ Forte</button><button data-w="neblina">🌫️ Neblina</button>
+    </div>
+  </div>
+  <div class="sec">
+    <h3>Fluxo de usuários</h3>
+    <div class="sl"><label>Veículos</label><input id="fCars" type="range" min="0" max="1100" step="10" value="420"><output id="fCarsV"></output></div>
+    <div class="sl"><label>Pedestres</label><input id="fPeds" type="range" min="0" max="260" step="5" value="70"><output id="fPedsV"></output></div>
+    <div class="sl"><label>Bicicletas</label><input id="fBikes" type="range" min="0" max="400" step="10" value="60"><output id="fBikesV"></output></div>
+    <div class="note" style="margin-top:2px">Veículos e bicicletas em un./h por sentido · pedestres simultâneos no trecho.</div>
+  </div>
+  <div class="sec">
+    <h3>Câmera</h3>
+    <div class="row" id="camRow">
+      <button data-cam="aerea">Aérea</button><button data-cam="planta">Planta</button><button data-cam="drone">Drone (fotomontagem)</button><button data-cam="pedestre">Pedestre</button><button data-cam="motorista">Motorista</button><button data-cam="ciclista">Ciclista</button>
+    </div>
+  </div>
+  <div class="sec">
+    <h3>Cenários rápidos</h3>
+    <div class="row" id="presetRow">
+      <button data-p="dia">Dia</button><button data-p="noite">Noite</button><button data-p="sol">Sol</button><button data-p="chuva">Tempo chuvoso</button><button data-p="neblina">Neblina</button>
+      <button data-p="pessoas">Muitas pessoas</button><button data-p="carros">Muitos carros</button><button data-p="bikes">Bicicletas</button><button data-p="pico">Hora de pico</button><button data-p="calmo">Trânsito calmo</button>
+    </div>
+  </div>
+</div>
+
+<div id="hud" class="glass">
+  <div class="big" id="hTime">09:30</div>
+  <div class="g">
+    <span class="k">Fase</span><span class="v" id="hPhase">Hoje</span>
+    <span class="k">Clima</span><span class="v" id="hW">Sol</span>
+    <span class="k">Veículos na via</span><span class="v" id="hCars">0</span>
+    <span class="k">Velocidade média (trecho)</span><span class="v" id="hSpd">–</span>
+    <span class="k">Pedestres / ciclistas</span><span class="v" id="hPeds">0</span>
+    <span class="k">Fluxo medido (2 sentidos)</span><span class="v" id="hFlow">–</span>
+    <span class="k">Conflitos veíc.×pedestre</span><span class="v" id="hConf">0</span>
+  </div>
+  <div id="sigchip"></div>
+</div>
+
+<div id="bottom" class="glass">
+  <button class="pri" id="bPres">▶ Apresentação</button>
+  <button id="bPlan">Planta baixa & seção</button>
+  <button id="bRefs">Imagens de referência</button>
+  <button id="bShot">📷 Capturar imagem</button>
+  <button id="bQR">QR code</button>
+</div>
+
+<div id="pres" class="glass">
+  <div class="st" id="pStep">Etapa 1 de 12</div>
+  <h2 id="pTitle"></h2>
+  <div class="tx" id="pText"></div>
+  <div class="nav">
+    <button id="pPrev">◀</button><button id="pPlay">⏸ Pausar</button><button id="pNext">▶</button>
+    <div class="prog"><div id="pBar"></div></div>
+    <button id="pClose">Sair</button>
+  </div>
+</div>
+
+<div class="modal" id="mPlan"><div class="mbox glass">
+  <div class="mhead"><h2>Planta baixa, seção transversal e quantitativos</h2>
+    <button class="tab" data-tab="plan-hoje">Planta · Hoje</button>
+    <button class="tab" data-tab="plan-op">Planta · Proposta</button>
+    <button class="tab" data-tab="sec">Seção transversal</button>
+    <button class="tab" data-tab="qt">Quantitativos</button>
+    <button data-close>✕</button></div>
+  <div class="mbody" id="planBody"></div>
+</div></div>
+
+<div class="modal" id="mRefs"><div class="mbox glass">
+  <div class="mhead"><h2>Imagens de referência do segmento</h2><button data-close>✕</button></div>
+  <div class="mbody"><div class="refs">
+    <figure><img src="img/streetview.jpg" alt="Street View da PE-060"><figcaption><b>Estado atual — nível da rua</b>PE-060, trecho urbano de Ipojuca. Google Earth / Street View (2026).<br><button data-goto="pedestre-hoje">Ver vista equivalente no 3D</button></figcaption></figure>
+    <figure><img src="img/satelite.jpg" alt="Imagem de satélite"><figcaption><b>Estado atual — satélite</b>Segmento junto a Rurópolis 2 / R. Alto São João. Imagem © 2026 Airbus (Google Earth).<br><button data-goto="planta-hoje">Ver em planta no 3D</button></figcaption></figure>
+    <figure><img src="img/montagem_bm.jpg" alt="Fotomontagem Banco Mundial"><figcaption><b>Proposta — fotomontagem Banco Mundial</b>URCOLA, Enrique. <i>Urban Crossings Transformation</i>. World Bank Group – Transport & Digital Development.<br><button data-goto="drone-op">Ver vista equivalente no 3D</button></figcaption></figure>
+  </div>
+  <div class="note">O modelo 3D é uma reconstrução conceitual e procedural a partir dessas imagens: edificações, vegetação e dimensões são indicativas e não substituem levantamento topográfico nem projeto executivo.</div></div>
+</div></div>
+
+<div class="modal" id="mShot"><div class="mbox glass" style="width:min(1000px,100%)">
+  <div class="mhead"><h2>Imagem capturada</h2><button data-close>✕</button></div>
+  <div class="mbody"><img id="shotImg" alt="Captura do modelo"><div class="note">Para salvar: clique com o botão direito na imagem → “Salvar imagem como…” (no celular, toque e segure).</div></div>
+</div></div>
+
+<div class="modal" id="mQR"><div class="mbox glass" style="width:min(620px,100%)">
+  <div class="mhead"><h2>Acessar o modelo 3D</h2><button data-close>✕</button></div>
+  <div class="mbody"><div id="qrBox"></div></div>
+</div></div>
+
+<div id="loading"><b>Construindo o trecho da PE-060…</b><span id="ldTxt">terreno, edificações e vegetação</span><div class="bar"><div></div></div></div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>
