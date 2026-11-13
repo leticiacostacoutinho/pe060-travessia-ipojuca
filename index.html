@@ -15,7 +15,7 @@ canvas#c{position:fixed;inset:0;width:100%;height:100%;display:block;touch-actio
 #top{position:fixed;left:12px;top:12px;padding:10px 14px;max-width:min(560px,calc(100vw - 24px))}
 #top h1{margin:0;font-size:15px;font-weight:700;letter-spacing:.2px}
 #top p{margin:2px 0 0;color:var(--mu);font-size:11.5px}
-#phaseBar{position:fixed;left:50%;transform:translateX(-50%);top:12px;display:flex;gap:4px;padding:4px}
+#phaseBar{position:fixed;left:12px;bottom:12px;display:flex;gap:4px;padding:4px;z-index:4}
 #phaseBar button{min-width:96px}
 button{font:inherit;color:var(--tx);background:var(--bg2);border:1px solid var(--ln);border-radius:8px;padding:6px 10px;cursor:pointer;transition:background .15s,border-color .15s}
 button:hover{background:rgba(255,255,255,.12)}
@@ -37,10 +37,10 @@ select{width:100%;font:inherit;color:var(--tx);background:#18212b;border:1px sol
 .sw{position:relative;width:34px;height:19px;background:#33424f;border-radius:10px;cursor:pointer;flex:none;transition:background .15s}
 .sw::after{content:"";position:absolute;left:2px;top:2px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left .15s}
 .sw.on{background:var(--ac)}.sw.on::after{left:17px}
-#bottom{position:fixed;left:50%;transform:translateX(-50%);bottom:12px;display:flex;gap:6px;padding:5px;flex-wrap:wrap;justify-content:center;max-width:calc(100vw - 24px)}
+#bottom{position:fixed;right:12px;bottom:12px;display:flex;gap:6px;padding:5px;flex-wrap:wrap;justify-content:flex-end;max-width:calc(100vw - 380px);z-index:4}
 #bottom button{padding:7px 12px;font-weight:500}
 #bottom button.pri{background:var(--ac);border-color:var(--ac);color:#04201c;font-weight:600}
-#hud{position:fixed;left:12px;bottom:64px;padding:10px 12px;min-width:236px;font-size:12px}
+#hud{position:fixed;left:12px;bottom:66px;padding:10px 12px;min-width:236px;font-size:12px}
 #hud .k{color:var(--mu)}#hud .v{font-weight:600;font-variant-numeric:tabular-nums}
 #hud .g{display:grid;grid-template-columns:1fr auto;gap:3px 14px}
 #hud .big{font-size:20px;font-weight:700;margin-bottom:4px}
@@ -70,7 +70,7 @@ table.q td:last-child,table.q th:last-child{text-align:right;font-variant-numeri
 .refs figcaption{padding:8px 10px;font-size:12px;color:var(--mu)}
 .refs figcaption b{color:var(--tx);display:block;margin-bottom:2px}
 .refs figcaption button{margin-top:6px}
-#pres{position:fixed;left:50%;transform:translateX(-50%);bottom:64px;width:min(720px,calc(100vw - 24px));padding:14px 16px;display:none;z-index:10}
+#pres{position:fixed;left:50%;transform:translateX(-50%);bottom:66px;width:min(720px,calc(100vw - 24px));padding:14px 16px;display:none;z-index:10}
 #pres.show{display:block}
 #pres .st{color:var(--ac);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.8px}
 #pres h2{margin:3px 0 6px;font-size:18px}
@@ -90,14 +90,18 @@ table.q td:last-child,table.q th:last-child{text-align:right;font-variant-numeri
 #qrBox img{width:260px;height:260px;background:#fff;border-radius:8px;padding:10px}
 .tab.on{background:var(--ac);color:#04201c;border-color:var(--ac);font-weight:600}
 @media (max-width:860px){
-  #panel{top:auto;bottom:64px;right:8px;left:8px;width:auto;max-height:46vh;display:none;z-index:6}
+  #panel{top:64px;bottom:auto;right:8px;left:8px;width:auto;max-height:58vh;display:none;z-index:6}
   #panel.open{display:block}
   #panelToggle{display:block}
   #hud{display:none}
-  #phaseBar{top:auto;bottom:62px}
+  #phaseBar{left:8px;bottom:10px;flex-direction:column;gap:4px;padding:4px}
+  #phaseBar button{min-width:92px;padding:7px 8px;font-size:12.5px}
+  #bottom{right:8px;bottom:10px;flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:4px;padding:4px;max-width:none}
+  #bottom button{padding:7px 10px;font-size:12.5px;text-align:left}
+  #pres{top:64px;bottom:auto;padding:10px 12px}
+  #pres h2{font-size:15px}#pres .tx{font-size:12px;max-height:30vh;overflow:auto}
   #top{max-width:calc(100vw - 110px)}
   #top p{display:none}
-  #phaseBar button{min-width:72px}
 }
 </style>
 <script>window.QR_URL="https://leticiacostacoutinho.github.io/pe060-travessia-ipojuca/";</script>
