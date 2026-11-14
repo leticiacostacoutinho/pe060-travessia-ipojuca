@@ -22,7 +22,7 @@ const ldTxt = document.getElementById('ldTxt');
 
 // ============================================================ Dados reais (PE3D + eixo DER-PE)
 const SITE = await (await fetch('data/site.json')).json();
-const HB = new Uint16Array(await (await fetch('data/heights.bin')).arrayBuffer());
+const HB = (() => { const bin = atob(SITE.hb64), u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); return new Uint16Array(u8.buffer); })();
 const AX = SITE.axis, AST = SITE.axisStep, NA = AX.length;
 const L = (NA - 1) * AST;
 const LP = new Float32Array(NA * 2), LR = new Float32Array(NA * 2);
