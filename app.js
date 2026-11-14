@@ -20,18 +20,17 @@ function noise2(x, y) { const xi = Math.floor(x), yi = Math.floor(y), xf = x - x
 function fbm(x, y) { return noise2(x, y) * 0.5 + noise2(x * 2.1 + 7, y * 2.1) * 0.3 + noise2(x * 4.3, y * 4.3 + 3) * 0.2; }
 const ldTxt = document.getElementById('ldTxt');
 
-// ============================================================ Eixo da PE-060
-// x = leste, -z = norte. u = estaca ao longo do eixo (sul → norte), s = afastamento lateral (+ leste)
-function cxz(z) { return 12 * Math.sin(-z / 220) - 0.0003 * Math.max(0, z) ** 2; }
-const cpts = []; for (let z = 330; z >= -340; z -= 10) cpts.push(new V3(cxz(z), 0, z));
-const curve = new THREE.CatmullRomCurve3(cpts, false, 'centripetal');
-const L = curve.getLength();
-const NL = 1600, LP = new Float32Array(NL * 2), LR = new Float32Array(NL * 2);
-for (let i = 0; i < NL; i++) {
-  const t = i / (NL - 1), p = curve.getPointAt(t), T = curve.getTangentAt(t);
-  const rx = -T.z, rz = T.x, l = Math.hypot(rx, rz);
-  LP[2 * i] = p.x; LP[2 * i + 1] = p.z; LR[2 * i] = rx / l; LR[2 * i + 1] = rz / l;
+// ============================================================ Dados reais (PE3D + eixo DER-PE)
+const SITE = await (await fetch('data/site.json')).json();
+const HB = new Uint16Array(await (await fetch('data/heights.bin')).arrayBuffer());
+const AX = SITE.axis, AST = SITE.axisStep, NA = AX.length;
+const L = (NA - 1) * AST;
+const LP = new Float32Array(NA * 2), LR = new Float32Array(NA * 2);
+for (let i = 0; i < NA; i++) {
+  const a = AX[Math.max(0, i - 1)], b = AX[Math.min(NA - 1, i + 1)]; const tx = b[0] - a[0], tz = b[1] - a[1], l = Math.hypot(tx, tz) || 1;
+  LP[2 * i] = AX[i][0]; LP[2 * i + 1] = AX[i][1]; LR[2 * i] = -tz / l; LR[2 * i + 1] = tx / l;
 }
+const NL = NA;
 function at(u, s = 0) {
   const f = clamp(u / L, 0, 1) * (NL - 1), i = Math.min(NL - 2, Math.floor(f)), t = f - i;
   const px = lerp(LP[2 * i], LP[2 * i + 2], t), pz = lerp(LP[2 * i + 1], LP[2 * i + 3], t);
@@ -39,19 +38,41 @@ function at(u, s = 0) {
   return [px + rx * s, pz + rz * s, rx, rz];
 }
 function yawAt(u, dir) { const r = at(u, 0); return Math.atan2(r[3] * dir, -r[2] * dir); }
-function lateralOf(x, z) { const c = cxz(z), d = (cxz(z - 1) - cxz(z + 1)) / 2; return (x - c) / Math.sqrt(1 + d * d); }
-
-const uA = 135, uB = Math.round(L - 135);       // trecho tratado (travessia urbana)
-const SIG_U = Math.round(uA + 0.5 * (uB - uA));
-const CROSS = [{ u: uA + 70, type: 'raised' }, { u: SIG_U, type: 'signal' }, { u: uB - 75, type: 'raised' }];
-const BUS = [{ u: SIG_U + 38, side: 'E' }, { u: SIG_U - 42, side: 'W' }];
-const BAYS = [[SIG_U + 26, SIG_U + 50, 'bus'], [uA + 105, uA + 135, 'park'], [uB - 140, uB - 112, 'park']];
+function arrAt(a, u) { const f = clamp(u / AST, 0, a.length - 1), i = Math.min(a.length - 2, Math.floor(f)); return lerp(a[i], a[i + 1], f - i); }
+const PY = (u) => arrAt(SITE.prof, u);
+// grade espacial para projetar (x,z) no eixo
+const HC = 8, HASH = new Map(); const hk = (cx, cz) => (cx + 2000) * 10000 + (cz + 2000);
+for (let i = 0; i < NA; i++) { const cx = Math.floor(AX[i][0] / HC), cz = Math.floor(AX[i][1] / HC); for (let dx = -5; dx <= 5; dx++) for (let dz = -5; dz <= 5; dz++) { const k = hk(cx + dx, cz + dz); let l = HASH.get(k); if (!l) HASH.set(k, l = []); l.push(i); } }
+function nearestUS(x, z) {
+  const l = HASH.get(hk(Math.floor(x / HC), Math.floor(z / HC))); if (!l) return null;
+  let bi = -1, bd = 1e18; for (const i of l) { const d = (AX[i][0] - x) ** 2 + (AX[i][1] - z) ** 2; if (d < bd) { bd = d; bi = i; } }
+  const j = bi < NA - 1 ? bi : bi - 1; const ax = AX[j][0], az = AX[j][1], bx = AX[j + 1][0], bz = AX[j + 1][1];
+  const vx = bx - ax, vz = bz - az, vl = vx * vx + vz * vz; let t = ((x - ax) * vx + (z - az) * vz) / vl; t = clamp(t, -0.5, 1.5);
+  const u = (j + t) * AST; const p = at(u, 0); return { u: clamp(u, 0, L), s: (x - p[0]) * p[2] + (z - p[1]) * p[3] };
+}
+function lateralOf(x, z) { const r = nearestUS(x, z); return r ? r.s : 999; }
+const uA = SITE.uA, uB = SITE.uB;
+const SIG_U = 1110;
+const CROSS = [{ u: 640, type: 'raised' }, { u: 860, type: 'raised' }, { u: SIG_U, type: 'signal' }, { u: 1300, type: 'raised' }, { u: 1560, type: 'raised' }, { u: 1740, type: 'raised' }];
+const BUS = [{ u: 1048, side: 'E' }, { u: 1165, side: 'W' }, { u: 745, side: 'E' }, { u: 1455, side: 'W' }];
+const BAYS = [[1036, 1060, 'bus'], [880, 905, 'park'], [1590, 1615, 'park']];
+const JUNC_L = [600, 700, 1103, 1290, 1480, 1660].map(u => [u - 6, u + 6]), JUNC_R = [[1279, 1292]];
 const WZ = 90;
 const CUTS = CROSS.map(c => [c.u - 4.6, c.u + 4.6]);
 function subtract(a, b, cuts) { let out = [[a, b]]; for (const [c0, c1] of cuts) { const n = []; for (const [x0, x1] of out) { if (c1 <= x0 || c0 >= x1) { n.push([x0, x1]); continue; } if (c0 > x0) n.push([x0, c0]); if (c1 < x1) n.push([c1, x1]); } out = n; } return out.filter(r => r[1] - r[0] > 0.2); }
+const inTreat = (u) => u >= uA - 20 && u <= uB + 20;
+function EL(u) { return inTreat(u) ? -clamp(arrAt(SITE.wL, u) - 0.3, 7.65, 11.6) : -6.0; }
+function ER(u) { return inTreat(u) ? clamp(arrAt(SITE.wR, u) - 0.3, 5.6, 9.95) : 6.0; }
+function runsWhere(fn, a, b, minLen = 10) { const r = []; let st = null; for (let u = a; u <= b; u += 1) { const ok = fn(u); if (ok && st === null) st = u; if ((!ok || u >= b) && st !== null) { if (u - st >= minLen) r.push([st, u]); st = null; } } return r; }
+const PL_L = runsWhere(u => EL(u) < -9.6, uA, uB).flatMap(([a, b]) => subtract(a, b, [...CUTS, ...JUNC_L])).filter(r => r[1] - r[0] > 4);
+const PL_R = runsWhere(u => ER(u) > 8.3, uA, uB).flatMap(([a, b]) => subtract(a, b, [...CUTS, ...JUNC_R])).filter(r => r[1] - r[0] > 4);
+const inRanges = (rs, u) => rs.some(r => u >= r[0] && u <= r[1]);
+const BAYS_OK = BAYS.filter(b => inRanges(runsWhere(u => ER(u) > 8.3, uA, uB, 1), (b[0] + b[1]) / 2));
+const innerL = (u) => inRanges(PL_L, u) ? -7.35 : -6.15;
+const innerR = (u) => (inRanges(PL_R, u) || BAYS_OK.some(b => u >= b[0] && u <= b[1])) ? 5.55 : 3.15;
 
 // ============================================================ Estado
-const state = { phase: 'hoje', prog: 0.45, hour: 9.5, month: 2, weather: 'sol', labels: true, agents: true, anim: false, daySpeed: 0.35, fCars: 420, fPeds: 70, fBikes: 60, cam: 'aerea' };
+const state = { phase: 'hoje', prog: 0.45, hour: 9.5, month: 2, weather: 'sol', labels: true, agents: true, anim: false, daySpeed: 0.35, fCars: 420, fPeds: 150, fBikes: 70, cam: 'aerea' };
 const ufront = () => uA + state.prog * (uB - uA - WZ);
 function isBuilt(u) { if (state.phase === 'op') return u >= uA && u <= uB; if (state.phase === 'obra') return u >= uA && u < ufront(); return false; }
 function inWork(u) { if (state.phase !== 'obra') return false; const f = ufront(); return u >= f && u <= f + WZ; }
@@ -74,7 +95,7 @@ const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0xb9c9d6, 0.0012);
 const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 1, 7000);
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true; controls.dampingFactor = 0.08; controls.maxPolarAngle = Math.PI * 0.495; controls.minDistance = 2; controls.maxDistance = 1600;
+controls.enableDamping = true; controls.dampingFactor = 0.08; controls.maxPolarAngle = Math.PI * 0.495; controls.minDistance = 2; controls.maxDistance = 2600;
 controls.screenSpacePanning = false;
 const ANISO = renderer.capabilities.getMaxAnisotropy();
 
@@ -89,7 +110,7 @@ let envRT = null;
 // Luzes
 const sun = new THREE.DirectionalLight(0xffffff, 3);
 sun.castShadow = true; const SMS = isMobile ? 2048 : 4096; sun.shadow.mapSize.set(SMS, SMS);
-Object.assign(sun.shadow.camera, { left: -160, right: 160, top: 160, bottom: -160, near: 10, far: 1400 });
+Object.assign(sun.shadow.camera, { left: -200, right: 200, top: 200, bottom: -200, near: 10, far: 1600 });
 sun.shadow.camera.updateProjectionMatrix(); sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.35;
 scene.add(sun, sun.target);
 const hemi = new THREE.HemisphereLight(0xbcd6ff, 0x6b5a46, 0.9); scene.add(hemi);
@@ -173,6 +194,7 @@ const M = {
   crown: MS({ color: 0xffffff, roughness: 0.95, flatShading: true }), frond: MS({ color: 0xffffff, roughness: 0.9, side: THREE.DoubleSide }),
   wire: new THREE.LineBasicMaterial({ color: 0x1c1c1c, transparent: true, opacity: 0.8 }),
   terrain: MS({ map: T.grass, vertexColors: true, roughness: 1 }),
+  ortho: new THREE.MeshLambertMaterial({ color: 0xe6e6e6 }), orthoRoof: new THREE.MeshLambertMaterial({ color: 0xf0f0f0, side: THREE.DoubleSide }),
 };
 const ROADMATS = [M.asphNew, M.asphOld, M.paver, M.bike, M.concrete, M.dirt, M.tactile, M.portal];
 ROADMATS.forEach(m => { m.userData.r0 = m.roughness; });
@@ -213,7 +235,7 @@ function ribbon(u0, u1, sA, sB, o = {}) {
 }
 function wallR(u0, u1, s, y0Fn, y1Fn, step = 2) {
   const n = Math.max(1, Math.ceil((u1 - u0) / step)), pos = [], uv = [], idx = [];
-  for (let i = 0; i <= n; i++) { const u = u0 + (u1 - u0) * i / n, p = at(u, s); const a = typeof y0Fn === 'function' ? y0Fn(u) : y0Fn, b = typeof y1Fn === 'function' ? y1Fn(u) : y1Fn; pos.push(p[0], a, p[1], p[0], b, p[1]); uv.push(u / 2, 0, u / 2, (b - a) / 2); if (i < n) { const j = i * 2; idx.push(j, j + 2, j + 1, j + 1, j + 2, j + 3); } }
+  for (let i = 0; i <= n; i++) { const u = u0 + (u1 - u0) * i / n, p = at(u, typeof s === 'function' ? s(u) : s); const a = typeof y0Fn === 'function' ? y0Fn(u) : y0Fn, b = typeof y1Fn === 'function' ? y1Fn(u) : y1Fn; pos.push(p[0], a, p[1], p[0], b, p[1]); uv.push(u / 2, 0, u / 2, (b - a) / 2); if (i < n) { const j = i * 2; idx.push(j, j + 2, j + 1, j + 1, j + 2, j + 3); } }
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); g.setIndex(idx); g.computeVertexNormals(); return g;
 }
 const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _e = new THREE.Euler();
@@ -223,29 +245,25 @@ function box(w, h, d, x = 0, y = 0, z = 0) { const g = new THREE.BoxGeometry(w, 
 function cyl(r0, r1, h, seg, x = 0, y = 0, z = 0) { const g = new THREE.CylinderGeometry(r0, r1, h, seg); g.translate(x, y + h / 2, z); return g; }
 const tf = (g, m) => { g.applyMatrix4(m); return g; };
 
-// ============================================================ Terreno
+// ============================================================ Terreno (MDT PE3D + ortofoto)
+const GR = SITE.grid;
 function terrainH(x, z) {
-  const s = lateralOf(x, z); let h = -0.04;
-  if (s < -11.5) { const d = -11.5 - s; h = d < 4 ? d * 0.95 : 3.8 + 42 * (1 - Math.exp(-(d - 4) / 55)); if (d > 8) h += (fbm(x * 0.03, z * 0.03) - 0.5) * 4 * smooth(8, 30, d); }
-  else if (s > 9.6) { const d = s - 9.6; h = -0.35 * smooth(0, 12, d) + (fbm(x * 0.02 + 5, z * 0.02) - 0.5) * 1.6 * smooth(10, 40, d); if (d > 80) h += 6 * smooth(80, 300, d) * fbm(x * 0.01, z * 0.01); }
-  const hill = 95 * Math.exp(-(((x + 60) / 300) ** 2 + ((z + 690) / 210) ** 2)); h += hill * smooth(13, 40, Math.abs(s + 1));
-  if (z > 340 || z < -350) h += 0; return h;
+  const c = clamp((x - GR.x0) / GR.step, 0, GR.nx - 1.001), r = clamp((z - GR.z0) / GR.step, 0, GR.nz - 1.001);
+  const i = Math.floor(c), j = Math.floor(r), fx = c - i, fz = r - j, k = j * GR.nx + i;
+  const h00 = HB[k], h10 = HB[k + 1], h01 = HB[k + GR.nx], h11 = HB[k + GR.nx + 1];
+  return lerp(lerp(h00, h10, fx), lerp(h01, h11, fx), fz) / 100;
 }
+let ORTHO_TEX = null;
+function orthoUV(x, z) { const O = SITE.ortho; return [(x - O.x0) / O.w, 1 - (z - O.z0) / O.h]; }
 function buildTerrain() {
-  const W = 1100, H = 1500, g = new THREE.PlaneGeometry(W, H, 240, 330); g.rotateX(-Math.PI / 2); g.translate(0, 0, -220);
-  const p = g.attributes.position, uv = g.attributes.uv, col = new Float32Array(p.count * 3);
-  const cG = new THREE.Color(), grass = new THREE.Color('#ffffff'), lat = new THREE.Color('#d08a5a'), dark = new THREE.Color('#9fa48a'), field = new THREE.Color('#dfe8b0');
-  for (let i = 0; i < p.count; i++) {
-    const x = p.getX(i), z = p.getZ(i), y = terrainH(x, z); p.setY(i, y); uv.setXY(i, x / 9, z / 9);
-    const s = lateralOf(x, z); cG.copy(grass);
-    if (s < -11.5 && s > -16.5) cG.lerp(lat, 0.85);
-    else if (s < -16.5 && s > -115) cG.lerp(dark, 0.45 + 0.3 * fbm(x * 0.05, z * 0.05));
-    else if (s > -11.5 && s < 9.6) cG.lerp(lat, 0.5);
-    else if (s > 40) cG.lerp(field, 0.25 * fbm(x * 0.02, z * 0.02));
-    const n = 0.85 + 0.3 * fbm(x * 0.08, z * 0.08); col[3 * i] = cG.r * n; col[3 * i + 1] = cG.g * n; col[3 * i + 2] = cG.b * n;
-  }
-  g.setAttribute('color', new THREE.BufferAttribute(col, 3)); g.computeVertexNormals();
-  const m = new THREE.Mesh(g, M.terrain); m.receiveShadow = true; return m;
+  const nx = GR.nx, nz = GR.nz, pos = new Float32Array(nx * nz * 3), uv = new Float32Array(nx * nz * 2), idx = [];
+  let minH = 1e9;
+  for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) { const k = j * nx + i, x = GR.x0 + i * GR.step, z = GR.z0 + j * GR.step, h = HB[k] / 100; minH = Math.min(minH, h); pos[3 * k] = x; pos[3 * k + 1] = h; pos[3 * k + 2] = z; const t = orthoUV(x, z); uv[2 * k] = t[0]; uv[2 * k + 1] = t[1]; }
+  for (let j = 0; j < nz - 1; j++) for (let i = 0; i < nx - 1; i++) { const a = j * nx + i, b = a + 1, c = a + nx, d = c + 1; idx.push(a, c, b, b, c, d); }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.BufferAttribute(uv, 2)); g.setIndex(idx); g.computeVertexNormals();
+  const m = new THREE.Mesh(g, M.ortho); m.receiveShadow = true;
+  const base = new THREE.Mesh(new THREE.PlaneGeometry(9000, 9000), MS({ color: 0x6d7a47, roughness: 1 })); base.rotation.x = -Math.PI / 2; base.position.y = minH - 1.5;
+  const grp = new THREE.Group(); grp.add(m, base); return grp;
 }
 
 // ============================================================ Árvores (instanciadas)
@@ -257,6 +275,7 @@ function makeTrees(list, group) {
   const tr = [], cr = [[], [], []], fr = [], ba = [];
   for (const t of list) {
     if (t.type === 'palm') { const h = t.h || rnd(7, 12); tr.push({ x: t.x, y: t.y, z: t.z, sx: 0.22, sy: h, tilt: rnd(-0.08, 0.08), rot: rnd(0, 6) }); fr.push({ x: t.x + Math.sin(tr[tr.length - 1].tilt) * h, y: t.y + h, z: t.z, s: rnd(0.85, 1.15), rot: rnd(0, 6), c: pick(TREECOL.palm) }); continue; }
+    if (t.type === 'data') { const h = t.h, r = clamp(0.3 * h, 1.2, 5.2); tr.push({ x: t.x, y: t.y, z: t.z, sx: 0.12 + 0.022 * h, sy: Math.max(1.2, h - r * 1.1), tilt: 0, rot: 0 }); const cc = TREECOL[h > 10 ? 'mango' : 'oiti']; const nb = h > 6 ? 3 : 1; for (let k = 0; k < nb; k++) { const an = hash2(Math.round(t.x * 10) + k, Math.round(t.z * 10)) * 6.28, dd = k === 0 ? 0 : r * 0.42; cr[k % 3].push({ x: t.x + Math.cos(an) * dd, y: t.y + h - r * (k === 0 ? 0.75 : 0.95), z: t.z + Math.sin(an) * dd, s: r * (k === 0 ? 1 : 0.72), rot: an, c: cc[(k + Math.round(t.x)) % cc.length] }); } continue; }
     if (t.type === 'banana') { const h = rnd(2.2, 3.4); tr.push({ x: t.x, y: t.y, z: t.z, sx: 0.16, sy: h, tilt: 0, rot: 0, green: true }); ba.push({ x: t.x, y: t.y + h, z: t.z, s: rnd(0.9, 1.3), rot: rnd(0, 6), c: pick(TREECOL.banana) }); continue; }
     const sc = t.s || 1, h = (t.type === 'young' ? 2.4 : rnd(2.6, 3.6)) * sc, R0 = (t.type === 'mango' ? rnd(3.2, 4.6) : t.type === 'young' ? 1.3 : rnd(2.4, 3.2)) * sc;
     tr.push({ x: t.x, y: t.y, z: t.z, sx: 0.28 * sc * (t.type === 'mango' ? 1.6 : 1), sy: h + R0 * 0.5, tilt: 0, rot: 0 });
@@ -270,95 +289,84 @@ function makeTrees(list, group) {
 }
 function treeAt(u, s, type, extra = {}) { const p = at(u, s); return { x: p[0], z: p[1], y: extra.y ?? terrainH(p[0], p[1]), type, ...extra }; }
 
-// ============================================================ Cenário compartilhado (casas, postes, vegetação)
-const HOUSES = []; const OLD_LAMPS = []; const POLES = [];
+// ============================================================ Cenário real: edificações, árvores, postes
+const HOUSES = SITE.buildings; const OLD_LAMPS = []; const POLES = [];
 const PLASTER = ['#efe9dc', '#f2e2b0', '#cfe3e8', '#d9ecd0', '#f0d0c8', '#e8d9b8', '#c7d6e8', '#f5f1e6', '#e3c9a8', '#a8d5c2', '#f4f4f2', '#e9c46a'];
-function addHouse(B, u, sC, w, d, side, opt = {}) {
-  const fsign = side === 'W' ? 1 : -1;
-  const pC = at(u, sC), pF = at(u, sC + fsign * d / 2), pBk = at(u, sC - fsign * d / 2);
-  const yF = terrainH(pF[0], pF[1]), yC = terrainH(pC[0], pC[1]), yBk = terrainH(pBk[0], pBk[1]);
-  const base = Math.min(yF, yC, yBk) - 0.4, floorY = opt.floorY ?? Math.max(yF, (yF + yC) / 2) + 0.1;
-  const floors = opt.floors || (R() < 0.42 ? 1 : R() < 0.75 ? 2 : 3), fh = opt.fh || 2.9;
-  const top = floorY + floors * fh, H = top - base;
-  // base: X = tangente*fsign, Z = face para a via
-  const rx = pC[2] * fsign, rz = pC[3] * fsign; const tx = rz, tz = -rx;
-  const m = new THREE.Matrix4().makeBasis(new V3(tx, 0, tz), new V3(0, 1, 0), new V3(rx, 0, rz)); m.setPosition(pC[0], 0, pC[1]);
-  const brick = opt.brick ?? (R() < 0.5);
-  const wall = boxUV(w, H, d, brick ? 1 : 2); wall.translate(0, base + H / 2, 0); B.add(brick ? 'brick' : 'plaster', tf(wall, m), brick ? pick(['#ffffff', '#f2e6dc', '#e8d8cc']) : (opt.color || pick(PLASTER)));
-  const roofT = opt.roof || (R() < 0.55 ? 'slab' : 'fibro');
-  if (roofT === 'slab') { const r = boxUV(w + 0.25, 0.2, d + 0.25, 3); r.translate(0, top + 0.1, 0); B.add('slab', tf(r, m), pick(['#ffffff', '#d8d4cc', '#c4c0b8'])); if (R() < 0.6) { const t = cyl(0.55, 0.55, 0.75, 12, rnd(-w / 3, w / 3), top + 0.2, rnd(-d / 3, d / 3)); B.add('vc', tf(t, m), '#2f6fb6'); } if (R() < 0.3) { const pp = boxUV(w + 0.25, 0.9, 0.12, 2); pp.translate(0, top + 0.55, d / 2 + 0.06); B.add(brick ? 'brick' : 'plaster', tf(pp, m), '#ffffff'); } }
-  else { const rh = d * 0.12, ov = 0.35; const pos = [-w / 2 - ov, top, -d / 2 - ov, w / 2 + ov, top, -d / 2 - ov, w / 2 + ov, top + rh, 0, -w / 2 - ov, top + rh, 0, -w / 2 - ov, top, d / 2 + ov, w / 2 + ov, top, d / 2 + ov]; const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, w / 2, 0, w / 2, d / 4, 0, d / 4, 0, d / 2, w / 2, d / 2], 2)); g.setIndex([0, 3, 1, 1, 3, 2, 4, 5, 3, 5, 2, 3]); g.computeVertexNormals(); B.add('fibro', tf(g, m), pick(['#ffffff', '#c9cbc4', '#b07a5a', '#9fb0c0'])); if (R() < 0.35) { const t = cyl(0.5, 0.5, 0.7, 12, rnd(-w / 3, w / 3), top + rh * 0.4, rnd(-d / 4, d / 4)); B.add('vc', tf(t, m), '#2f6fb6'); } }
-  // janelas/portas na fachada frontal (+Z) e posterior
-  const nWin = Math.max(1, Math.floor((w - 0.8) / 2.3));
-  for (let f = 0; f < floors; f++) for (let k = 0; k < nWin; k++) {
-    const x = -w / 2 + (k + 0.5) * w / nWin, y = floorY + f * fh + 1.45;
-    if (f === 0 && k === 0 && !opt.shop) { const dr = new THREE.PlaneGeometry(0.9, 2.1); dr.translate(x, floorY + 1.05, d / 2 + 0.03); B.add('vc', tf(dr, m), pick(['#5a3a24', '#3b4a5a', '#7a2a22', '#2e5a3a'])); continue; }
-    if (opt.shop && f === 0) continue;
-    const wi = new THREE.PlaneGeometry(1.0, 1.05); wi.translate(x, y, d / 2 + 0.03); const g2 = tf(wi, m); B.add('glassK', g2); if (R() < 0.38) { const wl = new THREE.PlaneGeometry(0.92, 0.97); wl.translate(x, y, d / 2 + 0.045); B.add('winLitK', tf(wl, m)); }
-    if (R() < 0.5) { const wb = new THREE.PlaneGeometry(1.0, 1.05); wb.rotateY(Math.PI); wb.translate(x, y, -d / 2 - 0.03); B.add('glassK', tf(wb, m)); }
-  }
-  if (opt.shop) { const rd = new THREE.PlaneGeometry(Math.min(w - 1, 4.2), 2.7); rd.translate(0, floorY + 1.35, d / 2 + 0.03); B.add('vcMetal', tf(rd, m), pick(['#8e949a', '#6f7a84', '#a4a9ae'])); }
-  HOUSES.push({ u, sC, w, d, side, x: pC[0], z: pC[1], rx, rz, tx, tz, top, floorY, shop: !!opt.shop });
-  return { m, top, floorY };
-}
 M.glassK = M.glass; M.winLitK = M.winLit;
-function buildShared() {
-  const g = new THREE.Group(), B = new Bucket(), BL = new Bucket(); const trees = [];
-  g.add(buildTerrain());
-  // encosta oeste — Rurópolis 2 / Alto São João
-  for (let row = 0; row < 11; row++) {
-    let u = rnd(0, 8) - 10;
-    while (u < L + 20) {
-      const w = rnd(4.8, 8.2), d = rnd(6, 9.5), s0 = -12.6 - row * 10.2 - rnd(0, 1.5), sC = s0 - d / 2;
-      const pc = at(u + w / 2, sC);
-      if (Math.abs(sC + 72) < 5.5 || (pc[1] < -200 && row > 4) || (pc[1] < -300) || R() < 0.08) { if (R() < 0.6) trees.push(treeAt(u + w / 2, sC, pick(['mango', 'banana', 'banana', 'palm', 'oiti']))); u += w + rnd(1, 4); continue; }
-      addHouse(B, u + w / 2, sC, w, d, 'W'); u += w + rnd(0.15, 1.6);
-      if (R() < 0.12) trees.push(treeAt(u - 0.5, sC - d / 2 - 1, pick(['banana', 'palm', 'mango'])));
+function buildBuildings(group) {
+  const parts = { brick: [], plaster: [], roof: [], glass: [], lit: [] };
+  const col = new THREE.Color();
+  let wi = 0;
+  for (const b of SITE.buildings) {
+    const P = b.p; if (P.length < 3) continue;
+    let area = 0; for (let i = 0; i < P.length; i++) { const a = P[i], c = P[(i + 1) % P.length]; area += a[0] * c[1] - c[0] * a[1]; }
+    const ccw = area > 0; const y0 = b.b - 0.4, y1 = b.b + b.h;
+    const rnd2 = mulberry32(Math.round(P[0][0] * 7919 + P[0][1] * 104729));
+    const brick = rnd2() < 0.45; col.set(brick ? '#ffffff' : PLASTER[Math.floor(rnd2() * PLASTER.length)]);
+    const W = { p: [], uv: [], c: [] }; let run = 0;
+    for (let i = 0; i < P.length; i++) {
+      const a = P[i], c = P[(i + 1) % P.length]; const dx = c[0] - a[0], dz = c[1] - a[1], len = Math.hypot(dx, dz); if (len < 0.05) continue;
+      // normal da face (-dz,dx) quando a ordem é a_b,b_b,b_t; externa = ccw ? (dz,-dx) : (-dz,dx)
+      const quad = ccw ? [[a, y0], [c, y1], [c, y0], [a, y0], [a, y1], [c, y1]] : [[a, y0], [c, y0], [c, y1], [a, y0], [c, y1], [a, y1]];
+      for (const [p, y] of quad) { W.p.push(p[0], y, p[1]); const isC = p === c; W.uv.push((run + (isC ? len : 0)) / (brick ? 1 : 2), (y - y0) / (brick ? 1 : 2)); W.c.push(col.r, col.g, col.b); }
+      // janelas
+      if (b.d < 150 && len > 2.6) {
+        const nx = (ccw ? dz : -dz) / len, nz = (ccw ? -dx : dx) / len; const floors = Math.max(1, Math.round(b.h / 2.9)); const nw = Math.floor((len - 0.6) / 2.6);
+        for (let f = 0; f < floors; f++) for (let k = 0; k < nw; k++) {
+          const t = (k + 0.5) / nw, cx = a[0] + dx * t + nx * 0.05, cz = a[1] + dz * t + nz * 0.05, cy = b.b + f * 2.9 + 1.45; if (cy + 0.6 > y1) continue;
+          const tx = dx / len * 0.5, tz = dz / len * 0.5; const q = [[cx - tx, cy - 0.52, cz - tz], [cx + tx, cy - 0.52, cz + tz], [cx + tx, cy + 0.52, cz + tz], [cx - tx, cy + 0.52, cz - tz]];
+          const tri = ccw ? [0, 2, 1, 0, 3, 2] : [0, 1, 2, 0, 2, 3]; const tgt = (hash2(wi++, 7) < 0.33) ? parts.lit : parts.glass;
+          for (const ti of tri) tgt.push(...q[ti]);
+        }
+      }
+      run += len;
     }
+    parts[brick ? 'brick' : 'plaster'].push(W);
+    // telhado (textura da ortofoto)
+    const tris = THREE.ShapeUtils.triangulateShape(P.map(p => new THREE.Vector2(p[0], p[1])), []);
+    const R0 = { p: [], uv: [] };
+    for (const t of tris) { let [i0, i1, i2] = t; const a = P[i0], c = P[i1], d = P[i2]; const cr = (c[0] - a[0]) * (d[1] - a[1]) - (c[1] - a[1]) * (d[0] - a[0]); if (cr > 0) [i1, i2] = [i2, i1]; for (const ii of [i0, i1, i2]) { R0.p.push(P[ii][0], y1, P[ii][1]); R0.uv.push(...orthoUV(P[ii][0], P[ii][1])); } }
+    parts.roof.push(R0);
   }
-  // R. Alto São João (rua da encosta)
-  B.add('concrete', ribbon(0, L, -75, -69, { step: 4, tileS: 3, tileU: 3, yFn: (u, s, x, z) => terrainH(x, z) + 0.25 }));
-  // lado leste: comércio de frente + casas + almoxarifado
-  let u = 6;
-  while (u < L - 5) {
-    const inField = (u > 300 && u < 360) || (u > L * 0.62 && u < L * 0.62 + 80);
-    if (inField || R() < 0.22) { const n = Math.floor(rnd(2, 5)); for (let k = 0; k < n; k++) trees.push(treeAt(u + rnd(0, 10), rnd(11, 26), pick(['oiti', 'mango', 'palm', 'banana', 'oiti']))); u += rnd(10, 22); continue; }
-    const w = rnd(6, 12), d = rnd(7, 11);
-    const shop = R() < 0.7; const r = addHouse(B, u + w / 2, 9.9 + d / 2, w, d, 'E', { shop, floors: shop ? 1 : (R() < 0.6 ? 1 : 2), fh: shop ? rnd(3.4, 4.2) : 2.9, floorY: 0.1, brick: R() < 0.3, roof: shop ? (R() < 0.5 ? 'fibro' : 'slab') : undefined });
-    if (shop) { const st = shopTex[Math.floor(R() * shopTex.length)]; const pl = new THREE.Mesh(new THREE.PlaneGeometry(Math.min(w - 0.4, 6), 1.1), MS({ map: st, roughness: 0.6 })); const p = at(u + w / 2, 9.85); pl.position.set(p[0], r.top - 0.7, p[1]); pl.rotation.y = Math.atan2(-p[2], -p[3]); pl.castShadow = false; g.add(pl); }
-    u += w + rnd(0.5, 5);
+  const mk = (list, mat, withC) => { const p = [], uv = [], c = []; for (const o of list) { p.push(...o.p); uv.push(...o.uv); if (withC) c.push(...o.c); } if (!p.length) return; const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); if (withC) g.setAttribute('color', new THREE.Float32BufferAttribute(c, 3)); g.computeVertexNormals(); const m = new THREE.Mesh(g, mat); m.castShadow = true; m.receiveShadow = true; group.add(m); return m; };
+  mk(parts.brick, M.brick, true); mk(parts.plaster, M.plaster, true); mk(parts.roof, M.orthoRoof, false);
+  const mkW = (arr, mat, name) => { if (!arr.length) return; const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3)); g.computeVertexNormals(); const m = new THREE.Mesh(g, mat); m.name = name; group.add(m); };
+  mkW(parts.glass, M.glass, 'win'); mkW(parts.lit, M.winLit, 'winLit');
+}
+function shiftToRoad(group) {
+  // aplica a cota do greide (PE3D) a tudo que foi construído no referencial plano da via
+  for (const ch of group.children) {
+    if (ch.isInstancedMesh) { const m = new THREE.Matrix4(), p = new V3(), q = new THREE.Quaternion(), s = new V3(); for (let i = 0; i < ch.count; i++) { ch.getMatrixAt(i, m); m.decompose(p, q, s); const r = nearestUS(p.x, p.z); p.y += r ? PY(r.u) : 0; m.compose(p, q, s); ch.setMatrixAt(i, m); } ch.instanceMatrix.needsUpdate = true; ch.computeBoundingSphere?.(); continue; }
+    if ((ch.isMesh || ch.isLineSegments) && ch.position.lengthSq() === 0 && !ch.userData.noShift) { const pa = ch.geometry.attributes.position; let cache = null; for (let i = 0; i < pa.count; i++) { const x = pa.getX(i), z = pa.getZ(i); const r = nearestUS(x, z); pa.setY(i, pa.getY(i) + (r ? PY(r.u) : PY(0))); } pa.needsUpdate = true; ch.geometry.computeBoundingSphere(); ch.geometry.computeBoundingBox(); continue; }
+    const r = nearestUS(ch.position.x, ch.position.z); ch.position.y += r ? PY(r.u) : 0;
   }
-  for (let i = 0; i < 70; i++) { const uu = rnd(L * 0.45, L - 20), s = rnd(32, 85); if (uu > L * 0.66 && uu < L * 0.66 + 70 && s < 75) continue; addHouse(B, uu, s, rnd(5, 8), rnd(6, 9), 'E', { floorY: terrainH(...at(uu, s).slice(0, 2)) + 0.1 }); }
-  for (let i = 0; i < 260; i++) trees.push(treeAt(rnd(0, L), rnd(18, 140), pick(['oiti', 'mango', 'palm', 'oiti', 'banana'])));
-  for (let i = 0; i < 160; i++) { const uu = rnd(-20, L + 20), s = -rnd(120, 230); trees.push(treeAt(uu, s, pick(['mango', 'oiti', 'palm']))); }
-  // almoxarifado (galpão)
-  { const u0 = L * 0.66, w = 62, d = 34, sC = 36 + d / 2; const p = at(u0 + w / 2, sC); const m = new THREE.Matrix4().makeBasis(new V3(p[3], 0, -p[2]), new V3(0, 1, 0), new V3(p[2], 0, p[3])); m.setPosition(p[0], 0, p[1]); const wl = boxUV(w, 9, d, 3); wl.translate(0, 4.4, 0); B.add('plaster', tf(wl, m), '#e8e6e0'); const rf = boxUV(w + 1, 0.4, d + 1, 3); rf.translate(0, 9.1, 0); B.add('vcMetal', tf(rf, m), '#c7ccd0'); HOUSES.push({ x: p[0], z: p[1], w, d, rx: p[2], rz: p[3], tx: p[3], tz: -p[2], label: 'Almoxarifado Central' }); }
-  // postes de concreto + fiação
-  const wires = [];
-  for (const [side, s, off] of [['W', -11.25, 0], ['E', 9.3, 19]]) {
+}
+function buildShared() {
+  const g = new THREE.Group(); g.add(buildTerrain());
+  ldTxt.textContent = 'edificações (MDE − MDT)'; buildBuildings(g);
+  const trees = SITE.trees.map(t => ({ x: t[0], z: t[1], y: t[2], h: t[3], type: 'data' }));
+  const tg = new THREE.Group(); makeTrees(trees, tg); g.add(tg);
+  // postes de concreto existentes + fiação (referencial da via)
+  const road = new THREE.Group(), B = new Bucket(), BL = new Bucket(); const wires = [];
+  for (const side of ['W', 'E']) {
     let prev = null;
-    for (let uu = off + 4; uu < L - 2; uu += 38) {
-      const m = placeMat(uu, s, 0, 0, 1); const p = at(uu, s);
+    for (let uu = (side === 'W' ? 8 : 27); uu < L - 4; uu += 38) {
+      const s = side === 'W' ? EL(uu) + 0.35 : ER(uu) - 0.35; const m = placeMat(uu, s, 0, 0, 1);
       B.add('vc', tf(cyl(0.11, 0.19, 10.5, 6), m.clone()), '#b8b5ad'); B.add('vc', tf(box(2.2, 0.12, 0.12, 0, 9.6, 0), m.clone()), '#9a978f');
       POLES.push({ u: uu, s, side });
-      const pt = (k) => { const rr = at(uu, s + (k - 1) * 0.9 * (side === 'W' ? 1 : -1)); return new V3(rr[0], 9.75, rr[1]); };
+      const pt = (k) => { const rr = at(uu, s + (k - 1) * 0.9 * (side === 'W' ? 1 : -1)); return new V3(rr[0], 9.75 + PY(uu), rr[1]); };
       if (prev) for (let k = 0; k < 3; k++) { const a = prev[k], b = pt(k); for (let j = 0; j < 10; j++) { const t0 = j / 10, t1 = (j + 1) / 10; const sag = (t) => -0.9 * 4 * t * (1 - t); wires.push(a.x + (b.x - a.x) * t0, a.y + (b.y - a.y) * t0 + sag(t0), a.z + (b.z - a.z) * t0, a.x + (b.x - a.x) * t1, a.y + (b.y - a.y) * t1 + sag(t1), a.z + (b.z - a.z) * t1); } }
       prev = [pt(0), pt(1), pt(2)];
-      if (side === 'W' && Math.round((uu - 4) / 38) % 2 === 0) { const dirS = 1; const arm = box(0.08, 0.08, 2.6, 0, 8.6, 0); const mm = placeMat(uu, s + 1.3 * dirS, 0, Math.PI / 2, 1); B.add('vc', tf(arm, mm), '#777'); const hp = at(uu, s + 2.6); const hd = box(0.5, 0.18, 0.28, 0, 8.5, 0); B.add('vc', tf(hd, placeMat(uu, s + 2.6, 0, 0, 1)), '#666'); BL.add('lampOld', tf(box(0.4, 0.04, 0.2, 0, 8.39, 0), placeMat(uu, s + 2.6, 0, 0, 1))); OLD_LAMPS.push({ x: hp[0], y: 8.3, z: hp[1], u: uu, s: s + 2.6 }); }
+      if (side === 'W' && Math.round((uu - 8) / 38) % 2 === 0) { const arm = box(0.08, 0.08, 2.6, 0, 8.6, 0); B.add('vc', tf(arm, placeMat(uu, s + 1.3, 0, Math.PI / 2, 1)), '#777'); const hp = at(uu, s + 2.6); B.add('vc', tf(box(0.5, 0.18, 0.28, 0, 8.5, 0), placeMat(uu, s + 2.6, 0, 0, 1)), '#666'); BL.add('lampOld', tf(box(0.4, 0.04, 0.2, 0, 8.39, 0), placeMat(uu, s + 2.6, 0, 0, 1))); OLD_LAMPS.push({ x: hp[0], y: 8.3 + PY(uu), z: hp[1], u: uu, s: s + 2.6 }); }
     }
   }
-  const wg = new THREE.BufferGeometry(); wg.setAttribute('position', new THREE.Float32BufferAttribute(wires, 3)); g.add(new THREE.LineSegments(wg, M.wire));
-  // pórtico de sinalização existente (norte)
-  { const uu = L - 45; for (const s of [-6.5, 6.5]) B.add('vcMetal', tf(cyl(0.18, 0.18, 7.2, 10), placeMat(uu, s, 0)), '#8d949a'); const beam = box(13.4, 0.35, 0.35, 0, 7.0, 0); B.add('vcMetal', tf(beam, placeMat(uu, 0, 0, 0, 1)), '#8d949a'); const sg = new THREE.Mesh(new THREE.PlaneGeometry(9, 2.2), MS({ map: wideSign([['PE-060  ·  IPOJUCA', 70], ['Porto de Galinhas  ↑     Recife  ↑', 52]]), roughness: 0.5 })); const p = at(uu, 0); sg.position.set(p[0], 7.9, p[1]); sg.rotation.y = yawAt(uu, -1); g.add(sg); }
-  // rodovia além do trecho modelado (continuidade visual)
-  makeTrees(trees, g);
-  B.flush(g, { receive: true, castKeys: ['brick', 'plaster', 'slab', 'fibro', 'vc', 'vcMetal'] });
-  BL.flush(g, { receive: false });
-  // brilho no chão das luminárias antigas
+  B.flush(road, { castKeys: ['vc'] }); BL.flush(road, { receive: false });
   const gg = []; for (const l of OLD_LAMPS) { const pl = new THREE.PlaneGeometry(14, 14); pl.rotateX(-Math.PI / 2); pl.translate(l.x, 0.06, l.z); gg.push(pl); }
-  if (gg.length) g.add(new THREE.Mesh(mergeGeometries(gg), M.glowOld));
-  // janelas acesas (malha separada)
-  g.traverse(o => { if (o.material === M.winLit) { o.name = 'winLit'; o.castShadow = false; } if (o.material === M.glass) o.castShadow = false; });
+  if (gg.length) road.add(new THREE.Mesh(mergeGeometries(gg), M.glowOld));
+  shiftToRoad(road);
+  const wg = new THREE.BufferGeometry(); wg.setAttribute('position', new THREE.Float32BufferAttribute(wires, 3)); road.add(new THREE.LineSegments(wg, M.wire));
+  g.add(road);
+  g.traverse(o => { if (o.material === M.glass) o.castShadow = false; });
   return g;
 }
 
@@ -404,7 +412,7 @@ function lamp(B, BL, lampsOut, u, s, armDir, h = 9, armLen = 2.2, kind = 'led') 
   const a = box(armLen, 0.07, 0.07); a.rotateY(yawAt(u, 1)); a.translate(mid[0], h + 0.1, mid[1]); B.add('vcMetal', a, '#7d858c');
   const hd = box(0.75, 0.12, 0.32); hd.rotateY(yawAt(u, 1)); hd.translate(p1[0], h + 0.05, p1[1]); B.add('vcMetal', hd, '#5f666d');
   const em = box(0.62, 0.03, 0.24); em.rotateY(yawAt(u, 1)); em.translate(p1[0], h - 0.03, p1[1]); BL.add('lampLED', em);
-  lampsOut.push({ x: p1[0], y: h - 0.2, z: p1[1], u, s: s + armDir * armLen, kind });
+  lampsOut.push({ x: p1[0], y: h - 0.2 + PY(u), z: p1[1], u, s: s + armDir * armLen, kind });
 }
 
 // ============================================================ Construtores de fase
@@ -413,51 +421,45 @@ function buildOld(g, B, u0, u1) {
   if (u1 - u0 < 0.5) return;
   const nE = (u) => 0.18 * (noise2(u * 0.3, 3) - 0.5), nW = (u) => 0.18 * (noise2(u * 0.3, 9) - 0.5);
   B.add('asphOld', ribbon(u0, u1, -3.5, 3.5, { tileS: 7, tileU: 7, sAFn: (u) => -3.5 + nW(u), sBFn: (u) => 3.5 + nE(u), uvS: true }));
-  B.add('dirt', ribbon(u0, u1, -11.7, -3.3, { y: -0.025, tileS: 5, tileU: 5, step: 3 }));
-  B.add('dirt', ribbon(u0, u1, 3.3, 9.9, { y: -0.025, tileS: 5, tileU: 5, step: 3 }));
-  B.add('grass', ribbon(u0, u1, -11.7, -10, { y: -0.012, tileS: 4, tileU: 4, step: 3, sBFn: (u) => -11.4 + 2.6 * Math.max(0, noise2(u * 0.12, 1) - 0.35) }));
-  B.add('grass', ribbon(u0, u1, 8, 9.9, { y: -0.012, tileS: 4, tileU: 4, step: 3, sAFn: (u) => 9.6 - 2.8 * Math.max(0, noise2(u * 0.12, 5) - 0.3) }));
-  // sinalização horizontal desgastada
   for (const s of [-0.18, 0.06]) B.add('yellowOld', ribbon(u0, u1, s, s + 0.12, { y: 0.008, step: 4 }));
-  for (let u = u0; u < u1; u += 1) { const len = noise2(u * 0.5, 2) > 0.35 ? 1 : 0; if (len) B.add('whiteOld', ribbon(u, Math.min(u1, u + 1), 3.18, 3.3, { y: 0.008, step: 1 })); }
+  for (let u = u0; u < u1; u += 1) { if (noise2(u * 0.5, 2) > 0.35) B.add('whiteOld', ribbon(u, Math.min(u1, u + 1), 3.18, 3.3, { y: 0.008, step: 1 })); }
 }
 function buildNew(g, B, BL, u0, u1, young = false) {
   if (u1 - u0 < 0.5) return;
   const trees = [];
   const yR = (u) => roadY(u), yR2 = (u) => roadY(u) + 0.012;
   const cutsIn = CUTS.filter(c => c[1] > u0 && c[0] < u1 && isBuilt((c[0] + c[1]) / 2));
+  const clip = (rs) => rs.map(([a, b]) => [Math.max(a, u0), Math.min(b, u1)]).filter(r => r[1] - r[0] > 0.3);
+  const plL = clip(PL_L), plR = clip(PL_R), bays = BAYS_OK.filter(b => b[1] > u0 && b[0] < u1).map(b => [Math.max(b[0], u0), Math.min(b[1], u1), b[2]]);
   B.add('asphNew', ribbon(u0, u1, -3.15, 3.15, { tileS: 6.3, tileU: 6.3, yFn: yR, step: 1, uvS: true }));
   B.add('bike', ribbon(u0, u1, -6.15, -3.65, { tileS: 4, tileU: 4, yFn: yR, step: 1 }));
-  // separador da ciclovia
   for (const [a, b] of subtract(u0, u1, cutsIn)) { B.add('curb', ribbon(a, b, -3.65, -3.15, { y: 0.13 })); B.add('curb', wallR(a, b, -3.65, 0, 0.13)); B.add('curb', wallR(a, b, -3.15, 0, 0.13)); }
   for (const [a, b] of cutsIn) { const aa = Math.max(a, u0), bb = Math.min(b, u1); if (bb > aa) B.add('asphNew', ribbon(aa, bb, -3.65, -3.15, { yFn: yR, step: 0.5 })); }
-  // calçada oeste
-  B.add('paver', ribbon(u0, u1, -10.9, -7.35, { y: 0.15, tileS: 4, tileU: 4 }));
-  B.add('tactile', ribbon(u0, u1, -9.45, -9.05, { y: 0.158, tileS: 0.4, tileU: 0.4 }));
-  B.add('concrete', ribbon(u0, u1, -11.6, -10.9, { y: 0.7, tileS: 2, tileU: 2 })); B.add('concrete', wallR(u0, u1, -10.9, 0.15, 0.7));
-  for (const [a, b] of subtract(u0, u1, cutsIn)) { B.add('grass', ribbon(a, b, -7.35, -6.3, { y: 0.15, tileS: 3, tileU: 3 })); B.add('curb', ribbon(a, b, -6.3, -6.15, { y: 0.15 })); B.add('curb', wallR(a, b, -6.15, 0, 0.15)); B.add('curb', ribbon(a, b, -7.4, -7.3, { y: 0.17 })); }
-  for (const [a, b] of cutsIn) { const aa = Math.max(a, u0), bb = Math.min(b, u1); if (bb > aa) { B.add('paver', ribbon(aa, bb, -7.35, -6.15, { y: 0.15, tileS: 4, tileU: 4 })); B.add('tactile', ribbon(aa, bb, -6.55, -6.15, { y: 0.158, tileS: 0.4, tileU: 0.4 })); } }
-  // lado leste: canteiro / baias / calçada
-  const bays = BAYS.filter(b => b[1] > u0 && b[0] < u1);
-  const eCuts = [...cutsIn, ...bays.map(b => [b[0], b[1]])];
-  for (const [a, b] of subtract(u0, u1, eCuts)) { B.add('grass', ribbon(a, b, 3.3, 5.55, { y: 0.15, tileS: 3, tileU: 3 })); B.add('curb', ribbon(a, b, 3.15, 3.3, { y: 0.15 })); B.add('curb', wallR(a, b, 3.15, 0, 0.15)); }
-  for (const [a, b] of cutsIn) { const aa = Math.max(a, u0), bb = Math.min(b, u1); if (bb > aa) { B.add('paver', ribbon(aa, bb, 3.15, 5.55, { y: 0.15, tileS: 4, tileU: 4 })); B.add('tactile', ribbon(aa, bb, 3.15, 3.55, { y: 0.158, tileS: 0.4, tileU: 0.4 })); } }
-  for (const [b0, b1, kind] of bays) { const a = Math.max(b0, u0), b = Math.min(b1, u1); if (b <= a) continue; B.add('asphNew', ribbon(a, b, 3.15, 5.55, { tileS: 6, tileU: 6 })); B.add('curb', wallR(a, b, 5.55, 0, 0.15)); B.add('curb', ribbon(a, b, 5.4, 5.55, { y: 0.152 })); if (kind === 'park') for (let uu = a; uu <= b; uu += 5.5) B.add('white', ribbon(uu, uu + 0.12, 3.2, 5.5, { y: 0.012 })); else { B.add('yellow', ribbon(a, b, 3.2, 3.32, { y: 0.012 })); B.add('yellow', ribbon(a, b, 5.38, 5.5, { y: 0.012 })); B.add('white', ribbon(a, a + 0.15, 3.2, 5.5, { y: 0.012 })); B.add('white', ribbon(b - 0.15, b, 3.2, 5.5, { y: 0.012 })); } }
-  B.add('paver', ribbon(u0, u1, 5.55, 8.6, { y: 0.15, tileS: 4, tileU: 4 }));
-  B.add('tactile', ribbon(u0, u1, 6.9, 7.3, { y: 0.158, tileS: 0.4, tileU: 0.4 }));
-  B.add('concrete', ribbon(u0, u1, 8.6, 9.95, { y: 0.15, tileS: 3, tileU: 3 }));
+  // lado oeste (NO, lado da comunidade): calçada até o alinhamento real das edificações
+  const tacL = (u) => (EL(u) + innerL(u)) / 2;
+  B.add('paver', ribbon(u0, u1, 0, 0, { y: 0.15, tileS: 4, tileU: 4, step: 1, sAFn: EL, sBFn: innerL }));
+  B.add('tactile', ribbon(u0, u1, 0, 0, { y: 0.158, tileS: 0.4, tileU: 0.4, step: 1, sAFn: (u) => tacL(u) - 0.2, sBFn: (u) => tacL(u) + 0.2 }));
+  B.add('curb', wallR(u0, u1, EL, 0.15, (u) => { const p = at(u, EL(u) - 1.2); return clamp(terrainH(p[0], p[1]) - PY(u) + 0.25, 0.45, 2.6); }, 1));
+  for (const [a, b] of plL) { B.add('grass', ribbon(a, b, -7.35, -6.3, { y: 0.15, tileS: 3, tileU: 3 })); B.add('curb', ribbon(a, b, -7.42, -7.3, { y: 0.17 })); }
+  for (const [a, b] of subtract(u0, u1, cutsIn)) { B.add('curb', ribbon(a, b, -6.3, -6.15, { y: 0.152 })); B.add('curb', wallR(a, b, -6.15, 0, 0.15)); }
+  // lado leste (SE): canteiro / baias / calçada até o alinhamento
+  for (const [a, b] of plR) { B.add('grass', ribbon(a, b, 3.3, 5.55, { y: 0.15, tileS: 3, tileU: 3 })); B.add('curb', ribbon(a, b, 5.5, 5.6, { y: 0.17 })); }
+  for (const [b0, b1, kind] of bays) { B.add('asphNew', ribbon(b0, b1, 3.15, 5.55, { tileS: 6, tileU: 6 })); B.add('curb', wallR(b0, b1, 5.55, 0, 0.15)); B.add('curb', ribbon(b0, b1, 5.55, 5.7, { y: 0.152 })); if (kind === 'park') for (let uu = b0; uu <= b1; uu += 5.5) B.add('white', ribbon(uu, uu + 0.12, 3.2, 5.5, { y: 0.012 })); else { B.add('yellow', ribbon(b0, b1, 3.2, 3.32, { y: 0.012 })); B.add('yellow', ribbon(b0, b1, 5.38, 5.5, { y: 0.012 })); } }
+  for (const [a, b] of subtract(u0, u1, [...cutsIn, ...bays.map(x => [x[0], x[1]])])) { B.add('curb', ribbon(a, b, 3.15, 3.3, { y: 0.152 })); B.add('curb', wallR(a, b, 3.15, 0, 0.15)); }
+  const tacR = (u) => (ER(u) + innerR(u)) / 2;
+  B.add('paver', ribbon(u0, u1, 0, 0, { y: 0.15, tileS: 4, tileU: 4, step: 1, sAFn: innerR, sBFn: ER }));
+  B.add('tactile', ribbon(u0, u1, 0, 0, { y: 0.158, tileS: 0.4, tileU: 0.4, step: 1, sAFn: (u) => tacR(u) - 0.2, sBFn: (u) => tacR(u) + 0.2 }));
   // sinalização horizontal
   const linCuts = cutsIn.map(c => [c[0] - 2, c[1] + 2]);
   for (const [a, b] of subtract(u0, u1, linCuts)) { for (const s of [-0.21, 0.09]) B.add('yellow', ribbon(a, b, s, s + 0.12, { yFn: yR2, step: 2 })); for (const s of [-3.08, 2.96]) B.add('white', ribbon(a, b, s, s + 0.12, { yFn: yR2, step: 2 })); }
   for (let uu = u0; uu < u1 - 1; uu += 3) if (!cutsIn.some(c => uu > c[0] - 1 && uu < c[1] + 1)) B.add('white', ribbon(uu, uu + 1.2, -4.96, -4.84, { yFn: yR2, step: 1.2 }));
-  for (const c of CROSS) { if (c.u < u0 || c.u > u1) continue; for (let s = -6.0; s < 3.0; s += 0.8) B.add('white', ribbon(c.u - 2, c.u + 2, s, s + 0.4, { yFn: yR2, step: 0.5 })); if (c.type === 'raised') for (const sgn of [-1, 1]) for (let s = -3.0; s < 3.0; s += 0.75) { const pos = [], uu0 = c.u + sgn * 3.05, uu1 = c.u + sgn * 4.3; const pa = at(uu0, s), pb = at(uu0, s + 0.5), pc = at(uu1, s + 0.25); const g2 = new THREE.BufferGeometry(); g2.setAttribute('position', new THREE.Float32BufferAttribute([pa[0], roadY(uu0) + 0.014, pa[1], pb[0], roadY(uu0) + 0.014, pb[1], pc[0], roadY(uu1) + 0.014, pc[1]], 3)); g2.setIndex(sgn > 0 ? [0, 2, 1] : [0, 1, 2]); g2.computeVertexNormals(); B.add('white', g2); } }
+  for (const c of CROSS) { if (c.u < u0 || c.u > u1) continue; for (let s = -6.0; s < 3.0; s += 0.8) B.add('white', ribbon(c.u - 2, c.u + 2, s, s + 0.4, { yFn: yR2, step: 0.5 })); if (c.type === 'raised') for (const sgn of [-1, 1]) for (let s = -3.0; s < 3.0; s += 0.75) { const uu0 = c.u + sgn * 3.05, uu1 = c.u + sgn * 4.3; const pa = at(uu0, s), pb = at(uu0, s + 0.5), pc = at(uu1, s + 0.25); const g2 = new THREE.BufferGeometry(); g2.setAttribute('position', new THREE.Float32BufferAttribute([pa[0], roadY(uu0) + 0.014, pa[1], pb[0], roadY(uu0) + 0.014, pb[1], pc[0], roadY(uu1) + 0.014, pc[1]], 3)); g2.setIndex(sgn > 0 ? [0, 2, 1] : [0, 1, 2]); g2.computeVertexNormals(); B.add('white', g2); } }
   if (SIG_U >= u0 && SIG_U <= u1) { B.add('white', ribbon(SIG_U - 5.4, SIG_U - 5, 0.1, 3.1, { y: 0.012 })); B.add('white', ribbon(SIG_U + 5, SIG_U + 5.4, -3.1, -0.1, { y: 0.012 })); }
-  // pictogramas de bicicleta e "30"
   const bikeG = [], n30 = [];
   for (let uu = u0 + 12; uu < u1 - 5; uu += 45) { if (cutsIn.some(c => Math.abs(uu - c[0]) < 10 || Math.abs(uu - c[1]) < 10)) continue; for (const [s, d] of [[-4.35, 1], [-5.5, -1]]) { const pl = new THREE.PlaneGeometry(1.1, 1.1); pl.rotateX(-Math.PI / 2); pl.rotateY(yawAt(uu, d) + Math.PI); const p = at(uu, s); pl.translate(p[0], 0.02, p[1]); bikeG.push(pl); } }
   if (bikeG.length) { const mm = new THREE.Mesh(mergeGeometries(bikeG), new THREE.MeshStandardMaterial({ map: T.bikeIcon, transparent: true, roughness: 0.7, polygonOffset: true, polygonOffsetFactor: -3 })); mm.receiveShadow = true; g.add(mm); }
   for (const [uu, s, d] of [[uA + 8, 1.6, 1], [uB - 8, -1.6, -1]]) { if (uu < u0 || uu > u1) continue; const pl = new THREE.PlaneGeometry(1.6, 4.2); pl.rotateX(-Math.PI / 2); pl.rotateY(yawAt(uu, d) + Math.PI); const p = at(uu, s); pl.translate(p[0], 0.02, p[1]); n30.push(pl); }
-  if (n30.length) { const mm = new THREE.Mesh(mergeGeometries(n30), new THREE.MeshStandardMaterial({ map: T.n30, transparent: true, roughness: 0.7, polygonOffset: true, polygonOffsetFactor: -3 })); g.add(mm); }
+  if (n30.length) g.add(new THREE.Mesh(mergeGeometries(n30), new THREE.MeshStandardMaterial({ map: T.n30, transparent: true, roughness: 0.7, polygonOffset: true, polygonOffsetFactor: -3 })));
   // portais de entrada (Zona 30)
   for (const [pu, d] of [[uA, 1], [uB, -1]]) {
     if (pu < u0 - 1 || pu > u1 + 1) continue;
@@ -466,48 +468,52 @@ function buildNew(g, B, BL, u0, u1, young = false) {
     B.add('vcMetal', tf(box(10.8, 0.5, 0.4, 0, 6.2, 0), placeMat(gu, 0, 0)), '#2f6fb6');
     const sg = new THREE.Mesh(new THREE.PlaneGeometry(8, 1.6), MS({ map: wideSign([['TRAVESSIA URBANA · IPOJUCA', 64], ['ZONA 30  ·  PEDESTRES E CICLISTAS', 44]], '#1f5fa8'), roughness: 0.5 }));
     const p = at(gu, 0); sg.position.set(p[0], 5.35, p[1]); sg.rotation.y = yawAt(gu, -d); sg.position.x += Math.sin(sg.rotation.y) * 0.25; sg.position.z += Math.cos(sg.rotation.y) * 0.25; g.add(sg);
-    addSign(g, B, d > 0 ? pu + 4 : pu - 4, d > 0 ? 8.1 : -10.4, d, TEX.lim30, 0.8);
-    addSign(g, B, d > 0 ? pu + 30 : pu - 30, d > 0 ? 8.1 : -10.4, d, TEX.bikeW, 0.75);
+    const su = d > 0 ? pu + 4 : pu - 4; addSign(g, B, su, d > 0 ? ER(su) - 0.3 : EL(su) + 0.3, d, TEX.lim30, 0.8);
+    const su2 = d > 0 ? pu + 30 : pu - 30; addSign(g, B, su2, d > 0 ? ER(su2) - 0.3 : EL(su2) + 0.3, d, TEX.bikeW, 0.75);
   }
   // árvores nos canteiros
-  for (const side of ['W', 'E']) {
-    for (let uu = u0 + 4; uu < u1 - 2; uu += 9) {
-      if (cutsIn.some(c => uu > c[0] - 1.5 && uu < c[1] + 1.5)) continue;
-      if (side === 'E' && bays.some(b => uu > b[0] - 1 && uu < b[1] + 1)) continue;
-      const s = side === 'W' ? -6.82 : 4.4; const typ = young ? 'young' : (hash2(Math.round(uu), side === 'W' ? 1 : 2) < 0.22 ? 'ipe' : 'oiti');
-      trees.push(treeAt(uu, s, typ, { y: 0.15, s: young ? 0.8 : rnd(0.85, 1.05) }));
-    }
+  for (let uu = u0 + 4; uu < u1 - 2; uu += 9) {
+    const typ = (side) => young ? 'young' : (hash2(Math.round(uu), side) < 0.22 ? 'ipe' : 'oiti');
+    if (inRanges(plL, uu) && inRanges(plL, uu - 1.5) && inRanges(plL, uu + 1.5)) trees.push(treeAt(uu, -6.82, typ(1), { y: 0.15, s: young ? 0.8 : rnd(0.85, 1.05) }));
+    if (inRanges(plR, uu) && inRanges(plR, uu - 1.5) && inRanges(plR, uu + 1.5)) trees.push(treeAt(uu, 4.45, typ(2), { y: 0.15, s: young ? 0.8 : rnd(0.85, 1.05) }));
   }
   makeTrees(trees, g);
   // iluminação
-  for (let uu = u0 + 6; uu < u1 - 2; uu += 30) { if (cutsIn.some(c => Math.abs(uu - (c[0] + c[1]) / 2) < 6)) continue; lamp(B, BL, PHASE_LAMPS, uu, -6.75, 1, 9, 2.6); lamp(B, BL, PHASE_LAMPS, uu + 15 < u1 ? uu + 15 : uu, 4.4, -1, 9, 2.4); lamp(B, BL, PHASE_LAMPS, uu + 8 < u1 ? uu + 8 : uu, -10.55, 1, 4.5, 0.6, 'ped'); lamp(B, BL, PHASE_LAMPS, uu + 22 < u1 ? uu + 22 : uu, 8.35, -1, 4.5, 0.6, 'ped'); }
-  for (const c of CROSS) { if (c.u < u0 || c.u > u1) continue; lamp(B, BL, PHASE_LAMPS, c.u - 3.5, -6.6, 1, 8, 3.4); lamp(B, BL, PHASE_LAMPS, c.u + 3.5, 4.0, -1, 8, 3.4); }
-  // travessias: sinalização vertical, balizadores
+  for (let uu = u0 + 6; uu < u1 - 2; uu += 30) {
+    if (cutsIn.some(c => Math.abs(uu - (c[0] + c[1]) / 2) < 6)) continue;
+    const sW = inRanges(plL, uu) ? -6.75 : EL(uu) + 0.4; lamp(B, BL, PHASE_LAMPS, uu, sW, 1, 9, clamp(-sW - 4.0, 1.5, 6));
+    const ue = Math.min(u1 - 1, uu + 15), sE = inRanges(plR, ue) ? 4.45 : ER(ue) - 0.4; lamp(B, BL, PHASE_LAMPS, ue, sE, -1, 9, clamp(sE - 3.4, 1.2, 6));
+    const up1 = Math.min(u1 - 1, uu + 8); lamp(B, BL, PHASE_LAMPS, up1, EL(up1) + 0.35, 1, 4.5, 0.6, 'ped');
+    const up2 = Math.min(u1 - 1, uu + 22); lamp(B, BL, PHASE_LAMPS, up2, ER(up2) - 0.35, -1, 4.5, 0.6, 'ped');
+  }
+  for (const c of CROSS) { if (c.u < u0 || c.u > u1) continue; lamp(B, BL, PHASE_LAMPS, c.u - 3.5, -6.6, 1, 8, 3.0); lamp(B, BL, PHASE_LAMPS, c.u + 3.5, 3.9, -1, 8, 3.0); }
   for (const c of CROSS) {
     if (c.u < u0 || c.u > u1) continue;
-    addSign(g, B, c.u - 45, 8.1, 1, TEX.ped, 0.8); addSign(g, B, c.u + 45, -10.4, -1, TEX.ped, 0.8);
-    for (const s of [-7.0, 3.75]) for (const du of [-4.3, -2.6, 2.6, 4.3]) B.add('vc', tf(cyl(0.08, 0.08, 0.9, 8), placeMat(c.u + du, s, 0.15)), '#30363c');
+    addSign(g, B, c.u - 45, ER(c.u - 45) - 0.3, 1, TEX.ped, 0.8); addSign(g, B, c.u + 45, EL(c.u + 45) + 0.3, -1, TEX.ped, 0.8);
+    for (const s of [-6.45, 3.45]) for (const du of [-4.3, -2.6, 2.6, 4.3]) B.add('vc', tf(cyl(0.08, 0.08, 0.9, 8), placeMat(c.u + du, s, 0.15)), '#30363c');
     if (c.type === 'signal') { signalHead(g, B, SIGM, c.u - 6.5, 3.7, 5.4, 1, -2.4); signalHead(g, B, SIGM, c.u - 6.5, 3.7, 3.1, 1, 0); signalHead(g, B, SIGM, c.u + 6.5, -3.4, 5.4, -1, 2.0); signalHead(g, B, SIGM, c.u + 6.5, -3.4, 3.1, -1, 0); pedHead(g, B, SIGM, c.u + 2.6, -6.6, 2.6, 1); pedHead(g, B, SIGM, c.u - 2.6, 3.6, 2.6, -1); pedHead(g, B, SIGM, c.u - 2.6, -3.4, 2.6, -1); pedHead(g, B, SIGM, c.u + 2.6, -3.4, 2.6, 1); }
   }
-  for (const b of BUS) { if (b.u < u0 || b.u > u1) continue; busShelter(B, b.u, b.side === 'E' ? 7.9 : -10.0, b.side); addSign(g, B, b.u + (b.side === 'E' ? -3 : 3), b.side === 'E' ? 6.0 : -7.7, b.side === 'E' ? 1 : -1, TEX.bus, 0.6, 2.4); for (let k = 0; k < 3; k++) B.add('vcMetal', tf(new THREE.TorusGeometry(0.38, 0.03, 6, 14, Math.PI), placeMat(b.u + (b.side === 'E' ? 6 : -6) + k * 0.8, b.side === 'E' ? 8.2 : -10.3, 0.15, Math.PI / 2)), '#8d949a'); }
-  // bancos e lixeiras
-  for (let uu = u0 + 20; uu < u1; uu += 55) { for (const [s, f] of [[-10.45, 1], [8.25, -1]]) { const m = placeMat(uu, s, 0.15, f > 0 ? -Math.PI / 2 : Math.PI / 2); B.add('vc', tf(box(1.8, 0.08, 0.45, 0, 0.45, 0), m.clone()), '#8a5a34'); B.add('vc', tf(box(1.8, 0.45, 0.06, 0, 0.75, -0.2), m.clone()), '#8a5a34'); B.add('vcMetal', tf(cyl(0.22, 0.2, 0.8, 10, 1.6, 0, 0), m.clone()), '#2f7a4a'); } }
-  // contenção do talude (gabião/concreto) ao longo da calçada oeste
-  B.add('concrete', wallR(u0, u1, -11.6, 0.7, (u) => { const p = at(u, -12.2); return Math.min(2.4, terrainH(p[0], p[1]) + 0.2); }));
-  if (u0 <= SIG_U && u1 >= SIG_U) addSign(g, B, SIG_U - 30, 8.1, 1, TEX.info, 1.0, 2.2);
+  for (const b of BUS) {
+    if (b.u < u0 || b.u > u1) continue; const E = b.side === 'E';
+    const outer = E ? ER(b.u) : EL(b.u), inner = E ? innerR(b.u) : innerL(b.u), wd = Math.abs(outer - inner);
+    if (wd >= 2.9) busShelter(B, b.u, outer + (E ? -1.0 : 1.0), b.side);
+    addSign(g, B, b.u + (E ? -3 : 3), inner + (E ? 0.35 : -0.35), E ? 1 : -1, TEX.bus, 0.6, 2.4);
+  }
+  for (let uu = u0 + 20; uu < u1; uu += 55) for (const side of ['W', 'E']) { const outer = side === 'W' ? EL(uu) : ER(uu), inner = side === 'W' ? innerL(uu) : innerR(uu); if (Math.abs(outer - inner) < 3) continue; const s = outer + (side === 'W' ? 0.55 : -0.55); const m = placeMat(uu, s, 0.15, side === 'W' ? -Math.PI / 2 : Math.PI / 2); B.add('vc', tf(box(1.8, 0.08, 0.45, 0, 0.45, 0), m.clone()), '#8a5a34'); B.add('vc', tf(box(1.8, 0.45, 0.06, 0, 0.75, -0.2), m.clone()), '#8a5a34'); B.add('vcMetal', tf(cyl(0.22, 0.2, 0.8, 10, 1.6, 0, 0), m.clone()), '#2f7a4a'); }
+  if (u0 <= SIG_U && u1 >= SIG_U) addSign(g, B, SIG_U - 30, ER(SIG_U - 30) - 0.3, 1, TEX.info, 1.0, 2.2);
 }
 function buildWork(g, B, u0, u1) {
   // pista existente permanece; frente de obra no lado oeste
   buildOld(g, B, u0, u1);
   const mid = (u0 + u1) / 2;
-  B.add('dirt', ribbon(u0 + 4, u1 - 4, -8.8, -4.0, { y: -0.01, tileS: 3, tileU: 3, step: 2 }));
+  B.add('dirt', ribbon(u0 + 4, u1 - 4, 0, -4.0, { y: -0.01, tileS: 3, tileU: 3, step: 2, sAFn: (u) => EL(u) + 0.1 }));
   B.add('vc', ribbon(u0 + 8, mid + 18, -7.6, -6.4, { y: -0.005, step: 2 }), '#4a3324');
   B.add('curb', ribbon(u0 + 2, mid, -6.3, -6.15, { y: 0.15 })); B.add('curb', wallR(u0 + 2, mid, -6.15, -0.02, 0.15));
-  B.add('concrete', ribbon(u0 + 2, u0 + 30, -10.9, -7.35, { y: 0.1, tileS: 2, tileU: 2 }));
+  B.add('concrete', ribbon(u0 + 2, u0 + 30, 0, -6.4, { y: 0.1, tileS: 2, tileU: 2, sAFn: (u) => EL(u) + 0.1 }));
   // tubos de drenagem
-  for (let uu = mid + 8; uu < u1 - 10; uu += 3.2) { const t = new THREE.CylinderGeometry(0.5, 0.5, 1.5, 14, 1, true); t.rotateZ(Math.PI / 2); t.rotateY(yawAt(uu, 1)); const p = at(uu, -9.4); t.translate(p[0], 0.5, p[1]); B.add('curb', t); }
+  for (let uu = mid + 8; uu < u1 - 10; uu += 3.2) { const t = new THREE.CylinderGeometry(0.5, 0.5, 1.5, 14, 1, true); t.rotateZ(Math.PI / 2); t.rotateY(yawAt(uu, 1)); const p = at(uu, EL(uu) + 0.9); t.translate(p[0], 0.5, p[1]); B.add('curb', t); }
   // montes de material
-  for (const [uu, s, r, c] of [[mid - 20, -9.6, 1.8, '#b97a4c'], [mid + 30, -9.8, 1.5, '#9a9488'], [mid - 35, -9.9, 1.3, '#d8c49a']]) { const sg = new THREE.SphereGeometry(r, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2); sg.scale(1.4, 0.6, 1); const p = at(uu, s); sg.translate(p[0], 0, p[1]); B.add('vc', sg, c); }
+  for (const [uu, s, r, c] of [[mid - 20, -9.6, 1.8, '#b97a4c'], [mid + 30, -9.8, 1.5, '#9a9488'], [mid - 35, -9.9, 1.3, '#d8c49a']]) { const sg = new THREE.SphereGeometry(r, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2); sg.scale(1.4, 0.6, 1); const p = at(uu, Math.max(s, EL(uu) + r)); sg.translate(p[0], 0, p[1]); B.add('vc', sg, c); }
   // cones: fechamento da faixa oeste (com transições)
   const cones = [];
   for (let uu = u0 - 22; uu <= u1 + 22; uu += 3) { let s = -0.1; if (uu < u0) s = lerp(-3.3, -0.1, clamp((uu - (u0 - 22)) / 22, 0, 1)); if (uu > u1) s = lerp(-0.1, -3.3, clamp((uu - u1) / 22, 0, 1)); cones.push([uu, s]); }
@@ -521,7 +527,7 @@ function buildWork(g, B, u0, u1) {
   // semáforos provisórios (pare-e-siga)
   signalHead(g, B, SIGT, u0 - 20, 4.4, 2.6, 1, 0); signalHead(g, B, SIGT, u1 + 25, -4.3, 2.6, -1, 0);
   // contêiner do canteiro + banheiro químico
-  { const m = placeMat(mid + 5, 7.4, 0, 0); B.add('vcMetal', tf(box(2.4, 2.6, 6.0, 0, 1.3, 0), m), '#e9eef2'); const m2 = placeMat(mid + 12, 7.6, 0, 0); B.add('vc', tf(box(1.2, 2.3, 1.2, 0, 1.15, 0), m2), '#2f6fb6'); }
+  { const m = placeMat(mid + 5, Math.max(4.6, ER(mid + 5) - 1.4), 0, 0); B.add('vcMetal', tf(box(2.4, 2.6, 6.0, 0, 1.3, 0), m), '#e9eef2'); const m2 = placeMat(mid + 12, Math.max(4.4, ER(mid + 12) - 0.8), 0, 0); B.add('vc', tf(box(1.2, 2.3, 1.2, 0, 1.15, 0), m2), '#2f6fb6'); }
   workRig = buildMachines(g, mid, u0, u1);
 }
 function machineMat(c) { return MS({ color: c, roughness: 0.55, metalness: 0.2 }); }
@@ -563,12 +569,13 @@ function buildPhase() {
   if (phaseGroup) { scene.remove(phaseGroup); phaseGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
   phaseGroup = new THREE.Group(); PHASE_LAMPS = []; workRig = [];
   const B = new Bucket(), BL = new Bucket(); const ph = state.phase;
-  if (ph === 'hoje') { buildOld(phaseGroup, B, 0, L); addSign(phaseGroup, B, uA - 20, 4.6, 1, TEX.lim60, 0.8, 1.7); addSign(phaseGroup, B, uB + 20, -4.6, -1, TEX.lim60, 0.8, 1.7); }
+  if (ph === 'hoje') { buildOld(phaseGroup, B, 0, L); addSign(phaseGroup, B, uA - 20, 5.0, 1, TEX.lim60, 0.8, 1.7); addSign(phaseGroup, B, uB + 20, -5.0, -1, TEX.lim60, 0.8, 1.7); }
   else if (ph === 'op') { buildOld(phaseGroup, B, 0, uA - 18); buildOld(phaseGroup, B, uB + 18, L); buildOld(phaseGroup, B, uA - 18, uA); buildOld(phaseGroup, B, uB, uB + 18); buildNew(phaseGroup, B, BL, uA, uB); }
   else { const f = ufront(); buildOld(phaseGroup, B, 0, uA); buildOld(phaseGroup, B, uB, L); if (f > uA + 1) buildNew(phaseGroup, B, BL, uA, f, true); buildWork(phaseGroup, B, f, f + WZ); buildOld(phaseGroup, B, f + WZ, uB); }
   B.flush(phaseGroup, { receive: true, castKeys: ['vc', 'vcMetal', 'curb', 'concrete'] }); BL.flush(phaseGroup, { receive: false });
   const gg = []; for (const l of PHASE_LAMPS) { const sz = l.kind === 'ped' ? 9 : 17; const pl = new THREE.PlaneGeometry(sz, sz); pl.rotateX(-Math.PI / 2); pl.translate(l.x, 0.2, l.z); gg.push(pl); }
   if (gg.length) phaseGroup.add(new THREE.Mesh(mergeGeometries(gg), M.glow));
+  shiftToRoad(phaseGroup);
   phaseGroup.traverse(o => { if (o.isMesh && o.material === M.glass) o.castShadow = false; });
   scene.add(phaseGroup); buildLabels(); lightCandidates = [...PHASE_LAMPS, ...OLD_LAMPS];
 }
@@ -683,12 +690,12 @@ function spawnBike(dir, u) {
   const mesh = new THREE.Mesh(mergeGeometries(parts), M.human); mesh.castShadow = true; agentsGroup.add(mesh);
   const b = { mesh, dir, u, v: srnd(3.6, 5.2), vmax: srnd(3.6, 5.4), off: bikeOff(u, dir), ph: srnd(0, 6) }; bikes.push(b); return b;
 }
-function pedWalkS(p) { if (inWork(p.u) && p.side === 'W') return -2.2 + p.o * 0.3; if (isBuilt(p.u)) return p.side === 'W' ? -9.0 + p.o * 1.1 : 7.1 + p.o * 0.9; return p.side === 'W' ? -5.1 + p.o * 0.7 : 5.0 + p.o * 0.7; }
-const frontS = (side) => side === 'W' ? -11.0 : 9.6;
+function pedWalkS(p) { if (inWork(p.u) && p.side === 'W') return -2.2 + p.o * 0.3; if (isBuilt(p.u)) { if (p.side === 'W') { const a = EL(p.u), b = innerL(p.u); return (a + b) / 2 + p.o * (b - a) * 0.3; } const a = innerR(p.u), b = ER(p.u); return (a + b) / 2 + p.o * (b - a) * 0.3; } return p.side === 'W' ? -5.0 + p.o * 0.5 : 4.9 + p.o * 0.5; }
+const frontS = (side, u) => side === 'W' ? EL(u) - 0.2 : ER(u) + 0.2;
 function spawnPed(initial = false) {
   const h = makeHuman(false); agentsGroup.add(h.group);
   const p = { h, u: srnd(uA - 50, uB + 50), side: SR() < 0.5 ? 'W' : 'E', dir: SR() < 0.5 ? 1 : -1, speed: srnd(1.0, 1.5), o: srnd(-1, 1), state: initial ? 'walk' : 'exit', life: srnd(40, 160), lastCross: -1, lastCrossT: -99, waitT: 0, cross: null, ph: srnd(0, 6), umb: SR() < 0.65 };
-  p.s = initial ? pedWalkS(p) : frontS(p.side); peds.push(p); return p;
+  p.s = initial ? pedWalkS(p) : frontS(p.side, p.u); peds.push(p); return p;
 }
 function removeFrom(arr, i, obj) { agentsGroup.remove(obj); arr.splice(i, 1); }
 const sig = { op: { veh: 'G', ped: 'D', rem: 0 }, tmp: { n: 'G', s: 'R', rem: 0 } };
@@ -738,7 +745,7 @@ function updateAgents(dt) {
       c.v = Math.max(0, c.v + acc * dt); c.x += c.v * dt; c.u = dir > 0 ? c.x : L - c.x; c.brake = acc < -0.7 || c.v < 0.3;
       if (!c.counted && c.u > SIG_U - 1 && c.u < SIG_U + 1) { c.counted = true; flowCount.push(simT); }
       const tOff = laneOff(c.u, dir) + c.mo * dir; c.off += (tOff - c.off) * Math.min(1, dt * 1.8);
-      const p = at(c.u, c.off); c.grp.position.set(p[0], roadY(c.u), p[1]); c.grp.rotation.y = yawAt(c.u, dir);
+      const p = at(c.u, c.off); c.grp.position.set(p[0], roadY(c.u) + PY(c.u), p[1]); c.grp.rotation.y = yawAt(c.u, dir);
       c.tl.material = c.brake ? M.brake : M.tail;
     }
   }
@@ -755,7 +762,7 @@ function updateAgents(dt) {
     b.v += (v - b.v) * Math.min(1, dt * 2); b.u += b.dir * b.v * dt;
     const t = bikeOff(b.u, b.dir); b.off += (t - b.off) * Math.min(1, dt * 0.9);
     const p = at(b.u, b.off); const onSide = Math.abs(b.off) > 6.2 || (isBuilt(b.u) && b.off > 3.15);
-    b.mesh.position.set(p[0], (isBuilt(b.u) && b.off < -3.6 ? roadY(b.u) : 0) + Math.abs(Math.sin(b.ph += dt * 8)) * 0.01, p[1]); b.mesh.rotation.y = yawAt(b.u, b.dir);
+    b.mesh.position.set(p[0], (isBuilt(b.u) && b.off < -3.6 ? roadY(b.u) : 0) + PY(b.u) + Math.abs(Math.sin(b.ph += dt * 8)) * 0.01, p[1]); b.mesh.rotation.y = yawAt(b.u, b.dir);
     if (b.u < uA - 70 || b.u > uB + 70) removeFrom(bikes, i, b.mesh);
   }
   // -------- pedestres
@@ -779,18 +786,18 @@ function updateAgents(dt) {
     } else if (p.state === 'cross') {
       const spd = p.speed * (p.cross ? 1.05 : 1.25); p.s += Math.sign(p.tgt - p.s) * Math.min(Math.abs(p.tgt - p.s), spd * dt); yaw = yawAt(p.u, 1) + (p.tgt > p.s ? Math.PI / 2 : -Math.PI / 2);
       if (Math.abs(p.tgt - p.s) < 0.05) { p.side = p.side === 'W' ? 'E' : 'W'; p.lastCross = p.cross ? p.cross.u : -1; p.lastCrossT = simT; p.cross = null; p.state = 'walk'; if (SR() < 0.5) p.dir *= -1; }
-    } else if (p.state === 'enter') { const t = frontS(p.side); p.s += Math.sign(t - p.s) * Math.min(Math.abs(t - p.s), p.speed * dt); yaw = yawAt(p.u, 1) + (t > p.s ? Math.PI / 2 : -Math.PI / 2); if (Math.abs(t - p.s) < 0.05) { removeFrom(peds, i, p.h.group); continue; } }
+    } else if (p.state === 'enter') { const t = frontS(p.side, p.u); p.s += Math.sign(t - p.s) * Math.min(Math.abs(t - p.s), p.speed * dt); yaw = yawAt(p.u, 1) + (t > p.s ? Math.PI / 2 : -Math.PI / 2); if (Math.abs(t - p.s) < 0.05) { removeFrom(peds, i, p.h.group); continue; } }
     if (p.u < uA - 70 || p.u > uB + 70 || peds.length > target + 25) { removeFrom(peds, i, p.h.group); continue; }
-    const pp = at(p.u, p.s); const onWalk = built && ((p.s < -6.15 && p.s > -11) || (p.s > 3.15 && p.s < 10));
+    const pp = at(p.u, p.s); const onWalk = built && (p.s < -6.15 || p.s > 3.15);
     const y = onWalk ? 0.15 : (Math.abs(p.s) <= 3.2 || (built && p.s < -3.1 && p.s > -6.2)) ? roadY(p.u) : 0;
-    p.h.group.position.set(pp[0], y, pp[1]); p.h.group.rotation.y = yaw;
+    p.h.group.position.set(pp[0], y + PY(p.u), pp[1]); p.h.group.rotation.y = yaw;
     if (moving) { p.ph += dt * p.speed * 5.6; const a = Math.sin(p.ph) * 0.5; p.h.l1.rotation.x = a; p.h.l2.rotation.x = -a; } else { p.h.l1.rotation.x *= 0.8; p.h.l2.rotation.x *= 0.8; }
     if (p.h.umb) p.h.umb.visible = raining && p.umb;
   }
   // -------- canteiro animado
   for (const r of workRig) {
     if (r.type === 'ex') { r.up.rotation.y = Math.sin(simT * 0.35) * 0.9; r.boom.rotation.x = -0.55 + Math.sin(simT * 0.7) * 0.18; r.stick.rotation.x = 1.5 + Math.sin(simT * 0.7 + 1) * 0.35; }
-    if (r.type === 'roll') { r.u = lerp(r.a, r.b, 0.5 + 0.5 * Math.sin(simT * 0.12)); const p = at(r.u, -1.7); r.obj.position.set(p[0], 0, p[1]); }
+    if (r.type === 'roll') { r.u = lerp(r.a, r.b, 0.5 + 0.5 * Math.sin(simT * 0.12)); const p = at(r.u, -1.7); r.obj.position.set(p[0], PY(r.u), p[1]); }
     if (r.type === 'worker') { r.h.l1.rotation.x = Math.sin(simT * 2 + r.t) * 0.08; r.h.group.rotation.y += Math.sin(simT * 0.3 + r.t) * 0.003; }
     if (r.type === 'flag') { const go = r.dir > 0 ? sig.tmp.n === 'G' : sig.tmp.s === 'G'; r.pad.material.map = go ? TEX.siga : TEX.pare; }
   }
@@ -873,15 +880,16 @@ const labelsEl = document.getElementById('labels'); let LBL = [];
 function buildLabels() {
   labelsEl.innerHTML = ''; LBL = [];
   const ph = state.phase, f = ufront();
+  const mW = (u) => (EL(u) + innerL(u)) / 2, mE = (u) => (ER(u) + innerR(u)) / 2;
   const defs = ph === 'hoje' ? [
-    [SIG_U - 30, -7.5, 1.8, 'Acostamento de terra — sem calçada', 'w'], [SIG_U + 22, 6.2, 1.8, 'Pedestres disputam espaço com veículos', 'w'], [SIG_U, 0, 2.2, 'Travessia sem proteção · 60 km/h', 'w'],
-    [SIG_U - 75, -13, 5, 'Talude exposto e erosão', 'w'], [SIG_U + 70, -3.6, 1.2, 'Sem drenagem superficial / meio-fio', 'w'], [SIG_U + 110, 10.5, 4.6, 'Comércio sem acesso organizado', 'w'], [SIG_U - 140, -40, 18, 'Comunidade Rurópolis 2 / Alto São João', '']]
+    [SIG_U - 30, -5.2, 1.8, 'Borda da pista sem calçada', 'w'], [SIG_U + 40, 5.0, 1.8, 'Pedestres disputam espaço com veículos', 'w'], [SIG_U, 0, 2.2, 'Acesso ao centro · travessia sem proteção', 'w'],
+    [860, 0, 2.2, 'Travessia informal · 60 km/h', 'w'], [1500, -5.2, 2.2, 'Trecho estreito junto à encosta', 'w'], [700, 5.0, 2.2, 'Comércio lindeiro sem organização', 'w'], [1000, -60, 22, 'Rurópolis (Ipojuca)', '']]
     : ph === 'op' ? [
-      [SIG_U - 25, -9.1, 1.6, 'Calçada acessível 3,5 m + piso tátil', 'p'], [SIG_U - 60, -4.9, 1.2, 'Ciclovia bidirecional 2,5 m', 'p'], [SIG_U - 90, 1.6, 1.8, 'Faixas de 3,0 m · Zona 30 km/h', 'p'],
-      [SIG_U, -1.5, 6.4, 'Travessia semaforizada com botoeira', 'p'], [CROSS[0].u, 0, 1.6, 'Travessia elevada (traffic calming)', 'p'], [CROSS[2].u, 0, 1.6, 'Travessia elevada', 'p'], [BUS[0].u, 7.9, 3.4, 'Abrigo de ônibus + baia', 'p'],
-      [SIG_U + 70, 4.4, 6.5, 'Canteiro arborizado (oiti / ipê)', 'p'], [SIG_U - 120, -6.8, 9.8, 'Iluminação LED veicular + pedonal', 'p'], [uA - 10, 0, 7.2, 'Portal de entrada — Zona 30', 'p'], [SIG_U + 100, 7.1, 1.6, 'Calçada 3,0 m', 'p'], [SIG_U - 150, -11.3, 1.6, 'Contenção do talude', 'p'], [BAYS[1][0] + 15, 4.4, 1.4, 'Baia de estacionamento', 'p']]
-      : [[f + WZ / 2, -7, 4.5, 'Frente de obra: drenagem, meio-fio e calçada', 'o'], [f - 20, 4.4, 4.0, 'Pare-e-siga com semáforo provisório', 'o'], [Math.max(uA + 20, f - 60), -4.9, 1.6, 'Trecho concluído', 'p'], [Math.min(uB - 10, f + WZ + 50), 0, 1.6, 'Trecho a executar', 'w'], [f + WZ / 2 + 5, 7.4, 3.4, 'Canteiro de obras', 'o'], [f + 30, -2.2, 1.9, 'Passagem protegida de pedestres', 'o'], [f - 90, 5, 2.6, 'Sinalização provisória · 30 km/h', 'o']];
-  for (const [u, s, h, t, c] of defs) { const p = at(u, s); const el = document.createElement('div'); el.className = 'lbl ' + c; el.textContent = t; labelsEl.appendChild(el); LBL.push({ el, v: new V3(p[0], h + (s < -11 ? terrainH(p[0], p[1]) : 0), p[1]) }); }
+      [SIG_U - 25, mW(SIG_U - 25), 1.6, 'Calçada acessível + piso tátil', 'p'], [SIG_U - 60, -4.9, 1.2, 'Ciclovia bidirecional 2,5 m', 'p'], [SIG_U - 90, 1.6, 1.8, 'Faixas de 3,0 m · Zona 30 km/h', 'p'],
+      [SIG_U, -1.5, 6.4, 'Travessia semaforizada com botoeira', 'p'], [860, 0, 1.6, 'Travessia elevada (traffic calming)', 'p'], [1300, 0, 1.6, 'Travessia elevada', 'p'], [BUS[0].u, mE(BUS[0].u), 3.4, 'Abrigo de ônibus + baia', 'p'],
+      [(PL_R[0] ? (PL_R[0][0] + PL_R[0][1]) / 2 : SIG_U + 70), 4.4, 6.5, 'Canteiro arborizado (oiti / ipê)', 'p'], [SIG_U - 120, -6.8, 9.8, 'Iluminação LED veicular + pedonal', 'p'], [uA - 10, 0, 7.2, 'Portal de entrada — Zona 30', 'p'], [uB + 10, 0, 7.2, 'Portal de entrada — Zona 30', 'p'], [SIG_U + 100, mE(SIG_U + 100), 1.6, 'Calçada até o alinhamento', 'p'], [1500, -6.6, 1.6, 'Seção reduzida no trecho estreito', 'p'], [BAYS[1][0] + 12, 4.4, 1.4, 'Baia de estacionamento', 'p']]
+      : [[f + WZ / 2, -7, 4.5, 'Frente de obra: drenagem, meio-fio e calçada', 'o'], [f - 20, 4.4, 4.0, 'Pare-e-siga com semáforo provisório', 'o'], [Math.max(uA + 20, f - 60), -4.9, 1.6, 'Trecho concluído', 'p'], [Math.min(uB - 10, f + WZ + 50), 0, 1.6, 'Trecho a executar', 'w'], [f + WZ / 2 + 5, 4.6, 3.4, 'Canteiro de obras', 'o'], [f + 30, -2.2, 1.9, 'Passagem protegida de pedestres', 'o'], [f - 90, 5, 2.6, 'Sinalização provisória · 30 km/h', 'o']];
+  for (const [u, s, h, t, c] of defs) { const p = at(u, s); const el = document.createElement('div'); el.className = 'lbl ' + c; el.textContent = t; labelsEl.appendChild(el); LBL.push({ el, v: new V3(p[0], h + PY(u), p[1]) }); }
 }
 const _v = new V3();
 function updateLabels() {
@@ -893,19 +901,19 @@ function updateLabels() {
 // ============================================================ Câmeras
 let camTween = null, follow = null;
 function camSpec(name) {
-  const S = (u, s, h) => { const p = at(u, s); return new V3(p[0], h, p[1]); };
+  const S = (u, s, h) => { const p = at(u, s); return new V3(p[0], h + PY(u), p[1]); };
   const f = ufront();
   switch (name) {
-    case 'aerea': { const t = S(SIG_U, 0, 0); return { pos: t.clone().add(new V3(135, 105, 120)), tgt: t }; }
-    case 'planta': { const t = S(SIG_U, -1, 0); return { pos: t.clone().add(new V3(0, 430, 1)), tgt: t }; }
-    case 'drone': return { pos: S(SIG_U - 62, -0.8, 13), tgt: S(SIG_U - 8, -0.8, 2.2) };
-    case 'pedestre': return { pos: S(SIG_U - 48, state.phase === 'op' ? -9.2 : -5.4, 1.65), tgt: S(SIG_U + 10, -2.5, 1.3) };
-    case 'obra': return { pos: S(f - 35, 22, 22), tgt: S(f + 25, -3, 0) };
-    case 'sinal': return { pos: S(SIG_U - 30, 7.2, 3.2), tgt: S(SIG_U + 2, -2, 1.5) };
-    case 'elevada': return { pos: S(CROSS[0].u - 28, -9.4, 2.6), tgt: S(CROSS[0].u + 4, -1, 0.6) };
-    case 'noite': return { pos: S(SIG_U - 70, 10, 9), tgt: S(SIG_U + 10, -2, 1) };
+    case 'aerea': return { pos: S(SIG_U - 170, 160, 125), tgt: S(SIG_U + 20, -25, 0) };
+    case 'planta': { const um = (uA + uB) / 2; const t = S(um, 0, 0); return { pos: t.clone().add(new V3(0, 980, 1)), tgt: t }; }
+    case 'drone': return { pos: S(1458, -0.8, 13), tgt: S(1512, -0.8, 2.2) };
+    case 'pedestre': { const u = SIG_U - 48; return { pos: S(u, state.phase === 'op' ? (EL(u) + innerL(u)) / 2 : -5.2, 1.65), tgt: S(SIG_U + 10, -2.5, 1.3) }; }
+    case 'obra': return { pos: S(f - 40, 26, 24), tgt: S(f + 25, -3, 0) };
+    case 'sinal': return { pos: S(SIG_U - 30, Math.min(7.2, ER(SIG_U - 30) - 0.6), 3.2), tgt: S(SIG_U + 2, -2, 1.5) };
+    case 'elevada': { const c = 1300, u = c - 28; return { pos: S(u, (EL(u) + innerL(u)) / 2, 2.6), tgt: S(c + 4, -1, 0.6) }; }
+    case 'noite': return { pos: S(SIG_U - 80, 1.5, 10), tgt: S(SIG_U + 10, -2, 1) };
     case 'secao': return { pos: S(SIG_U - 18, 0.5, 2.4), tgt: S(SIG_U + 30, 0.5, 1.2) };
-    case 'geral': { const t = S(SIG_U, 0, 0); return { pos: t.clone().add(new V3(-210, 160, 260)), tgt: S(SIG_U - 20, 0, 0) }; }
+    case 'geral': { const um = (uA + uB) / 2; return { pos: S(um, 720, 430), tgt: S(um, -60, 0) }; }
   }
   return null;
 }
@@ -972,26 +980,26 @@ function updateHUD(dt) {
 
 // ============================================================ Apresentação
 const STEPS = [
-  { t: 'PE-060 · Travessia urbana de Ipojuca', x: 'Segmento urbano da PE-060 junto às comunidades de <b>Rurópolis 2 / Alto São João</b>, em Ipojuca. A rodovia estadual funciona como rua principal do bairro: concentra comércio, pontos de ônibus e a travessia diária de moradores. O trecho integra o eixo de <b>Travessias Urbanas</b> do Componente 3 (Obras Seguras e Resilientes) do Programa Rodovias Resilientes — DER-PE / Banco Mundial.', ph: 'hoje', cam: 'geral', hour: 9.5, w: 'sol' },
-  { t: 'Diagnóstico — como é hoje', x: '<ul><li>Pista simples de ~7 m, sem calçadas, com acostamentos de terra irregulares.</li><li>Pedestres caminhando na borda da pista e atravessando em qualquer ponto.</li><li>Velocidade praticada incompatível com o uso urbano (≈ 60 km/h).</li><li>Talude exposto a oeste e drenagem superficial inexistente.</li></ul>', ph: 'hoje', cam: 'pedestre', hour: 10, w: 'sol', labels: true },
-  { t: 'Conflitos entre veículos e pedestres', x: 'Com fluxo intenso, as travessias sem proteção geram frenagens bruscas. O painel ao lado conta os <b>conflitos simulados veículo × pedestre</b>. Compare depois com a fase de operação.', ph: 'hoje', cam: 'drone', hour: 17.5, w: 'sol', fCars: 750, fPeds: 160 },
-  { t: 'Concepção — diretrizes do Banco Mundial', x: 'Inspirada no estudo <i>Urban Crossings Transformation</i> (World Bank, E. Urcola), a proposta transforma a rodovia em <b>rua completa</b>:<ul><li>Zona 30 km/h com portais de entrada e travessias elevadas;</li><li>Segregação de modos: calçadas acessíveis, ciclovia e faixas de 3,0 m;</li><li>Travessia semaforizada no ponto de maior demanda;</li><li>Arborização, iluminação LED, drenagem e contenção do talude.</li></ul>', ph: 'op', cam: 'aerea', hour: 10, w: 'sol', fCars: 420, fPeds: 80 },
-  { t: 'Seção transversal proposta (≈ 21 m)', x: 'Oeste → leste: contenção + <b>calçada 3,5 m</b> com piso tátil · canteiro 1,2 m · <b>ciclovia bidirecional 2,5 m</b> · separador 0,5 m · <b>2 faixas de 3,0 m</b> · canteiro/baia 2,4 m · <b>calçada 3,0 m</b> · testada 1,4 m. Abra <i>Planta baixa & seção</i> para ver as cotas e os quantitativos.', ph: 'op', cam: 'secao', hour: 11, w: 'sol', btn: ['Abrir seção transversal', () => openPlan('sec')] },
-  { t: 'Execução — mobilização e 1ª frente', x: 'A obra avança por frentes de ~90 m no sentido sul → norte. Na frente ativa, a faixa oeste é fechada e o tráfego passa em <b>meia pista com pare-e-siga</b> e semáforo provisório. Executam-se drenagem (tubos e caixas), meio-fio, base da calçada e da ciclovia.', ph: 'obra', prog: 0.08, cam: 'obra', hour: 9, w: 'sol' },
-  { t: 'Execução — avanço da obra', x: 'Atrás da frente, o trecho já recebe pavimento novo, sinalização e arborização jovem. Pedestres circulam por <b>passagem protegida</b> entre cones, separada da escavação. Use o controle <i>Avanço da obra</i> para ver qualquer etapa.', ph: 'obra', prog: 0.55, cam: 'obra', hour: 14, w: 'nublado' },
-  { t: 'Execução — fase final', x: 'A última frente fecha o trecho norte. Concluídos, os segmentos já operam como Zona 30, com travessias e iluminação definitivas.', ph: 'obra', prog: 0.96, cam: 'obra', hour: 16, w: 'sol' },
-  { t: 'Operação — travessia semaforizada', x: 'No ponto de maior demanda, semáforo veicular e de pedestres com <b>botoeira</b>, faixa de pedestres contínua sobre a ciclovia e rampas acessíveis. O ciclo simulado é de 62 s, com 14 s de verde para pedestres e 5 s de verde piscante.', ph: 'op', cam: 'sinal', hour: 16.5, w: 'sol', fPeds: 110 },
-  { t: 'Operação — travessias elevadas e ciclovia', x: 'As <b>travessias elevadas</b> (no nível da calçada) reduzem a velocidade dos veículos para ~15 km/h e dão prioridade ao pedestre. A ciclovia bidirecional segregada liga as duas pontas do bairro.', ph: 'op', cam: 'elevada', hour: 8, w: 'sol', fBikes: 180 },
-  { t: 'Noite — iluminação LED', x: 'Postes LED veiculares a cada 30 m em cada lado, intercalados, mais luminárias pedonais de 4,5 m nas calçadas e reforço sobre as travessias. Compare com a iluminação pontual de hoje (vapor de sódio em poste de concreto).', ph: 'op', cam: 'noite', hour: 19.6, w: 'sol' },
-  { t: 'Chuva — drenagem e acessibilidade', x: 'Meio-fio, sarjeta e rede de drenagem retiram a água da pista; a calçada elevada permanece transitável. Com a chuva há menos pedestres, mais guarda-chuvas e velocidades menores.', ph: 'op', cam: 'drone', hour: 15, w: 'chuva' },
-  { t: 'Resultado esperado', x: 'Uma rua segura para quem mora, compra e circula: velocidade média próxima de 30 km/h, pedestres e ciclistas segregados, travessias protegidas e espaço público qualificado. Veja os <b>quantitativos indicativos</b> em <i>Planta baixa & seção</i>.', ph: 'op', cam: 'aerea', hour: 10, w: 'sol', fCars: 420, fPeds: 80, fBikes: 80, btn: ['Ver quantitativos', () => openPlan('qt')] },
+  { t: 'PE-060 · Travessia urbana de Rurópolis (Ipojuca)', x: 'Trecho de <b>1,9 km</b> da Rodovia Armínio Guilherme dos Santos (PE-060, km 15,51–19,20) que atravessa Rurópolis. O modelo foi montado com dados reais do <b>PE3D</b>: terreno (MDT), alturas das edificações e árvores (MDE − MDT) e ortofoto, sobre o eixo do cadastro rodoviário do DER-PE. Integra o eixo de <b>Travessias Urbanas</b> do Programa Rodovias Resilientes (DER-PE / Banco Mundial).', ph: 'hoje', cam: 'geral', hour: 9.5, w: 'sol' },
+  { t: 'Diagnóstico — como é hoje', x: '<ul><li>Pista simples de cerca de 7 m, com bordas sem calçada e acessos lindeiros sem organização.</li><li>Pedestres caminhando na borda da pista e atravessando em qualquer ponto.</li><li>Velocidade praticada incompatível com o uso urbano (cerca de 60 km/h).</li><li>Entre as estacas 1.400 e 1.600 a via passa em corte, com a encosta e as casas muito próximas.</li></ul>', ph: 'hoje', cam: 'drone', hour: 10, w: 'sol', labels: true },
+  { t: 'Conflitos entre veículos e pedestres', x: 'Com fluxo intenso, as travessias sem proteção geram frenagens bruscas. O painel conta os <b>conflitos simulados veículo × pedestre</b>; compare depois com a fase de operação.', ph: 'hoje', cam: 'pedestre', hour: 17.5, w: 'sol', fCars: 750, fPeds: 260 },
+  { t: 'Concepção — diretrizes do Banco Mundial', x: 'Inspirada no estudo <i>Urban Crossings Transformation</i> (World Bank, E. Urcola), a proposta transforma a rodovia em <b>rua completa</b> entre as estacas ' + uA + ' e ' + uB + ' (cerca de 1,25 km):<ul><li>Zona 30 km/h com portais de entrada e 5 travessias elevadas;</li><li>Calçadas acessíveis até o alinhamento real das edificações, ciclovia bidirecional e faixas de 3,0 m;</li><li>Travessia semaforizada no acesso principal ao centro (estaca ' + SIG_U + ');</li><li>Arborização, iluminação LED, drenagem e contenção das encostas.</li></ul>', ph: 'op', cam: 'aerea', hour: 10, w: 'sol' },
+  { t: 'Seção transversal que se adapta ao lugar', x: 'Seção-tipo onde há espaço: calçada · canteiro 1,2 m · <b>ciclovia 2,5 m</b> · separador 0,5 m · <b>2 faixas de 3,0 m</b> · canteiro/baia 2,4 m · calçada. Onde as casas estão mais próximas, o canteiro é suprimido e a calçada vai até o alinhamento real medido no PE3D. Veja em <i>Planta baixa & seção</i>.', ph: 'op', cam: 'secao', hour: 11, w: 'sol', btn: ['Abrir a planta da proposta', () => openPlan('plan-op')] },
+  { t: 'Execução — mobilização e 1ª frente', x: 'A obra avança por frentes de cerca de 90 m, de sudoeste para nordeste. Na frente ativa, a faixa do lado da comunidade é fechada e o tráfego passa em <b>meia pista com pare-e-siga</b> e semáforo provisório. Executam-se drenagem, meio-fio, base da calçada e da ciclovia.', ph: 'obra', prog: 0.08, cam: 'obra', hour: 9, w: 'sol' },
+  { t: 'Execução — avanço da obra', x: 'Atrás da frente, o trecho já recebe pavimento novo, sinalização e arborização jovem. Pedestres circulam por <b>passagem protegida</b> entre cones. Use o controle <i>Avanço da obra</i> para ver qualquer etapa.', ph: 'obra', prog: 0.5, cam: 'obra', hour: 14, w: 'nublado' },
+  { t: 'Execução — fase final', x: 'A última frente fecha o trecho junto ao entroncamento nordeste. Os segmentos concluídos já operam como Zona 30, com travessias e iluminação definitivas.', ph: 'obra', prog: 0.96, cam: 'obra', hour: 16, w: 'sol' },
+  { t: 'Operação — travessia semaforizada', x: 'No acesso principal ao centro de Rurópolis, semáforo veicular e de pedestres com <b>botoeira</b>, faixa contínua sobre a ciclovia e rampas acessíveis. Ciclo simulado de 62 s, com 14 s de verde para pedestres.', ph: 'op', cam: 'sinal', hour: 16.5, w: 'sol', fPeds: 220 },
+  { t: 'Operação — travessias elevadas e ciclovia', x: 'As <b>travessias elevadas</b>, no nível da calçada, reduzem a velocidade para cerca de 15 km/h e dão prioridade ao pedestre. A ciclovia bidirecional segregada liga as duas pontas do bairro.', ph: 'op', cam: 'elevada', hour: 8, w: 'sol', fBikes: 200 },
+  { t: 'Noite — iluminação LED', x: 'Postes LED a cada 30 m em cada lado, intercalados, mais luminárias pedonais nas calçadas e reforço sobre as travessias. Compare com a iluminação pontual de hoje (vapor de sódio nos postes de concreto).', ph: 'op', cam: 'noite', hour: 19.6, w: 'sol' },
+  { t: 'Chuva — drenagem e acessibilidade', x: 'Meio-fio, sarjeta e rede de drenagem retiram a água da pista; a calçada elevada continua transitável. Com chuva há menos pedestres, mais guarda-chuvas e velocidades menores.', ph: 'op', cam: 'drone', hour: 15, w: 'chuva' },
+  { t: 'Resultado esperado', x: 'Uma rua segura para quem mora, compra e circula: velocidade próxima de 30 km/h, pedestres e ciclistas segregados, travessias protegidas e espaço público qualificado. Veja os <b>quantitativos indicativos</b> em <i>Planta baixa & seção</i>.', ph: 'op', cam: 'geral', hour: 10, w: 'sol', fBikes: 90, btn: ['Ver quantitativos', () => openPlan('qt')] },
 ];
 let presI = -1, presPlay = true, presTimer = 0; const PRES_DUR = 14;
 function showStep(i) {
   presI = clamp(i, 0, STEPS.length - 1); const s = STEPS[presI]; presTimer = 0;
   $('pres').classList.add('show'); $('pStep').textContent = `Etapa ${presI + 1} de ${STEPS.length}`; $('pTitle').textContent = s.t; $('pText').innerHTML = s.x;
   if (s.btn) { const b = document.createElement('button'); b.textContent = s.btn[0]; b.style.marginTop = '8px'; b.onclick = s.btn[1]; $('pText').appendChild(document.createElement('br')); $('pText').appendChild(b); }
-  state.anim = false; Object.assign(state, { hour: s.hour ?? state.hour, weather: s.w ?? state.weather, fCars: s.fCars ?? 420, fPeds: s.fPeds ?? 80, fBikes: s.fBikes ?? 60, labels: s.labels ?? true });
+  state.anim = false; Object.assign(state, { hour: s.hour ?? state.hour, weather: s.w ?? state.weather, fCars: s.fCars ?? 420, fPeds: s.fPeds ?? 150, fBikes: s.fBikes ?? 70, labels: s.labels ?? true });
   setPhase(s.ph, s.prog ?? state.prog); setCam(s.cam); syncUI();
 }
 function stopPres() { presI = -1; $('pres').classList.remove('show'); }
@@ -1005,48 +1013,52 @@ document.querySelectorAll('.modal').forEach(m => { m.addEventListener('click', (
 $('bPlan').onclick = () => openPlan('plan-op');
 document.querySelectorAll('#mPlan .tab').forEach(b => b.onclick = () => openPlan(b.dataset.tab));
 function openPlan(tab) { $('mPlan').classList.add('show'); document.querySelectorAll('#mPlan .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tab)); const body = $('planBody'); if (tab.startsWith('plan')) body.innerHTML = planHTML(tab === 'plan-op'); else if (tab === 'sec') body.innerHTML = sectionHTML(); else body.innerHTML = quantHTML(); if (tab.startsWith('plan')) enablePanZoom(); }
-const PX = (x, z) => [(-z).toFixed(2), (x).toFixed(2)];
-function strip(u0, u1, a, b, fill, step = 3, extra = '') { const pts = []; for (let u = u0; u <= u1 + 0.01; u += Math.min(step, Math.max(0.5, u1 - u))) { const p = at(Math.min(u, u1), a); pts.push(PX(p[0], p[1]).join(',')); if (u >= u1) break; } { const p = at(u1, a); pts.push(PX(p[0], p[1]).join(',')); } for (let u = u1; u >= u0 - 0.01; u -= Math.min(step, Math.max(0.5, u - u0))) { const p = at(Math.max(u, u0), b); pts.push(PX(p[0], p[1]).join(',')); if (u <= u0) break; } { const p = at(u0, b); pts.push(PX(p[0], p[1]).join(',')); } return `<polygon points="${pts.join(' ')}" fill="${fill}" ${extra}/>`; }
-function line(u0, u1, s, stroke, w, dash = '') { const pts = []; for (let u = u0; u <= u1; u += 4) { const p = at(u, s); pts.push(PX(p[0], p[1]).join(',')); } const p = at(u1, s); pts.push(PX(p[0], p[1]).join(',')); return `<polyline points="${pts.join(' ')}" fill="none" stroke="${stroke}" stroke-width="${w}" ${dash ? `stroke-dasharray="${dash}"` : ''}/>`; }
-function txt(u, s, t, size = 2.4, col = '#222', anchor = 'middle', weight = 600) { const p = at(u, s); const [x, y] = PX(p[0], p[1]); return `<text x="${x}" y="${y}" font-size="${size}" fill="${col}" text-anchor="${anchor}" font-family="Inter,Arial" font-weight="${weight}">${t}</text>`; }
+const _dir = (() => { const a = AX[0], b = AX[NA - 1]; const dx = b[0] - a[0], dz = b[1] - a[1], l = Math.hypot(dx, dz); return [dx / l, dz / l]; })();
+const PX = (x, z) => [(x * _dir[0] + z * _dir[1]).toFixed(2), (x * -_dir[1] + z * _dir[0]).toFixed(2)];
+const _v2 = (f, u) => typeof f === 'function' ? f(u) : f;
+function strip(u0, u1, a, b, fill, step = 3, extra = '') { if (u1 - u0 < 0.2) return ''; const A = [], Bp = []; for (let u = u0; ; u += step) { const uu = Math.min(u, u1); const pa = at(uu, _v2(a, uu)), pb = at(uu, _v2(b, uu)); A.push(PX(pa[0], pa[1]).join(',')); Bp.push(PX(pb[0], pb[1]).join(',')); if (uu >= u1) break; } return `<polygon points="${A.concat(Bp.reverse()).join(' ')}" fill="${fill}" ${extra}/>`; }
+function line(u0, u1, s, stroke, w, dash = '') { const pts = []; for (let u = u0; ; u += 4) { const uu = Math.min(u, u1); const p = at(uu, _v2(s, uu)); pts.push(PX(p[0], p[1]).join(',')); if (uu >= u1) break; } return `<polyline points="${pts.join(' ')}" fill="none" stroke="${stroke}" stroke-width="${w}" ${dash ? `stroke-dasharray="${dash}"` : ''}/>`; }
+function txt(u, s, t, size = 2.4, col = '#222', anchor = 'middle', weight = 600) { const p = at(u, s); const [x, y] = PX(p[0], p[1]); return `<text x="${x}" y="${y}" font-size="${size}" fill="${col}" text-anchor="${anchor}" font-family="Inter,Arial" font-weight="${weight}" paint-order="stroke" stroke="#f4f1ea" stroke-width="${size * 0.18}">${t}</text>`; }
 function circ(u, s, r, fill, stroke = 'none') { const p = at(u, s); const [x, y] = PX(p[0], p[1]); return `<circle cx="${x}" cy="${y}" r="${r}" fill="${fill}" stroke="${stroke}" stroke-width="0.15"/>`; }
 function planSVG(prop) {
-  const a = uA - 40, b = uB + 40; let s = '';
-  // edificações
-  for (const h of HOUSES) { const d = lateralOf(h.x, h.z); if (Math.abs(d) > 70) continue; const hu = h.u ?? 0; if (h.u !== undefined && (h.u < a - 10 || h.u > b + 10)) continue; const c = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([i, j]) => PX(h.x + h.tx * i * h.w / 2 + h.rx * j * h.d / 2, h.z + h.tz * i * h.w / 2 + h.rz * j * h.d / 2).join(',')); s += `<polygon points="${c.join(' ')}" fill="${h.shop ? '#d9cbb3' : '#d4cfc6'}" stroke="#a9a293" stroke-width="0.15"/>`; if (h.label) { const [x, y] = PX(h.x, h.z); s += `<text x="${x}" y="${y}" font-size="3" text-anchor="middle" fill="#555" font-family="Inter">${h.label}</text>`; } }
-  if (!prop) { s += strip(a, b, -11.7, -3.4, '#d3a27a') + strip(a, b, 3.4, 9.9, '#d3a27a') + strip(a, b, -3.5, 3.5, '#8b8b8a') + line(a, b, 0, '#e0b040', 0.15) + line(a, b, 3.25, '#eee', 0.12, '1 1'); }
+  const a = uA - 60, b = uB + 40; let s = '';
+  for (const h of SITE.buildings) { if (h.d > 75) continue; s += `<polygon points="${h.p.map(p => PX(p[0], p[1]).join(',')).join(' ')}" fill="#d4cfc6" stroke="#a9a293" stroke-width="0.15"/>`; }
+  const hoje = (u0, u1) => strip(u0, u1, EL, -3.5, '#e2c7a6') + strip(u0, u1, 3.5, ER, '#e2c7a6') + strip(u0, u1, -3.5, 3.5, '#8b8b8a') + line(u0, u1, 0, '#e0b040', 0.15) + line(u0, u1, 3.25, '#eee', 0.12, '1 1');
+  if (!prop) s += hoje(a, b);
   else {
-    s += strip(a, uA, -11.7, -3.4, '#d3a27a') + strip(a, uA, 3.4, 9.9, '#d3a27a') + strip(a, uA, -3.5, 3.5, '#8b8b8a') + strip(uB, b, -11.7, -3.4, '#d3a27a') + strip(uB, b, 3.4, 9.9, '#d3a27a') + strip(uB, b, -3.5, 3.5, '#8b8b8a');
-    s += strip(uA - 18, uA, -3.5, 3.5, '#9a4434') + strip(uB, uB + 18, -3.5, 3.5, '#9a4434');
-    s += strip(uA, uB, -11.6, -10.9, '#b9b5ac') + strip(uA, uB, -10.9, -7.35, '#cfccc4') + strip(uA, uB, -9.45, -9.05, '#e6c22c') + strip(uA, uB, -7.35, -6.15, '#86ad5a') + strip(uA, uB, -6.15, -3.65, '#b4554a') + strip(uA, uB, -3.65, -3.15, '#e8e6e0') + strip(uA, uB, -3.15, 3.15, '#55565a') + strip(uA, uB, 3.15, 5.55, '#86ad5a') + strip(uA, uB, 5.55, 8.6, '#cfccc4') + strip(uA, uB, 6.9, 7.3, '#e6c22c') + strip(uA, uB, 8.6, 9.95, '#bdb9b0');
-    for (const [b0, b1, k] of BAYS) s += strip(b0, b1, 3.15, 5.55, '#55565a') + txt((b0 + b1) / 2, 4.6, k === 'bus' ? 'BAIA ÔNIBUS' : 'ESTAC.', 1.1, '#fff');
-    for (const c of CROSS) { s += strip(c.u - 4.6, c.u + 4.6, -7.35, -6.15, '#cfccc4') + strip(c.u - 4.6, c.u + 4.6, 3.15, 5.55, '#cfccc4') + strip(c.u - 4.6, c.u + 4.6, -3.65, -3.15, '#55565a'); if (c.type === 'raised') s += strip(c.u - 4.6, c.u + 4.6, -6.15, 3.15, '#6e6f73'); for (let k = -6.0; k < 3.0; k += 0.8) s += strip(c.u - 2, c.u + 2, k, k + 0.4, '#fff', 1); }
-    const cuts = CUTS.map(c => [c[0] - 2, c[1] + 2]); for (const [p0, p1] of subtract(uA, uB, cuts)) { s += line(p0, p1, -0.15, '#f0b41c', 0.12) + line(p0, p1, 0.15, '#f0b41c', 0.12) + line(p0, p1, -4.9, '#fff', 0.12, '1 2'); }
-    for (let u = uA + 4; u < uB; u += 9) { if (CUTS.some(c => u > c[0] - 1.5 && u < c[1] + 1.5)) continue; s += circ(u, -6.82, 1.6, 'rgba(60,120,50,.55)', '#2f5a24'); if (!BAYS.some(bb => u > bb[0] - 1 && u < bb[1] + 1)) s += circ(u, 4.4, 1.6, 'rgba(60,120,50,.55)', '#2f5a24'); }
-    for (let u = uA + 6; u < uB - 2; u += 30) { s += circ(u, -6.75, 0.35, '#f2b233', '#333') + circ(u + 15, 4.4, 0.35, '#f2b233', '#333'); }
-    for (const bb of BUS) { const ss = bb.side === 'E' ? 7.9 : -10.0; s += strip(bb.u - 2.2, bb.u + 2.2, ss - 0.95, ss + 0.95, '#2f6fb6'); }
+    s += hoje(a, uA - 18) + hoje(uB + 18, b) + strip(uA - 18, uA, -3.5, 3.5, '#9a4434') + strip(uB, uB + 18, -3.5, 3.5, '#9a4434') + strip(uA - 18, uA, EL, -3.5, '#e2c7a6') + strip(uA - 18, uA, 3.5, ER, '#e2c7a6') + strip(uB, uB + 18, EL, -3.5, '#e2c7a6') + strip(uB, uB + 18, 3.5, ER, '#e2c7a6');
+    s += strip(uA, uB, EL, innerL, '#cfccc4', 1) + strip(uA, uB, (u) => (EL(u) + innerL(u)) / 2 - 0.2, (u) => (EL(u) + innerL(u)) / 2 + 0.2, '#e6c22c', 2);
+    for (const [p0, p1] of PL_L) s += strip(p0, p1, -7.35, -6.15, '#86ad5a');
+    s += strip(uA, uB, -6.15, -3.65, '#b4554a') + strip(uA, uB, -3.65, -3.15, '#e8e6e0') + strip(uA, uB, -3.15, 3.15, '#55565a');
+    for (const [p0, p1] of PL_R) s += strip(p0, p1, 3.15, 5.55, '#86ad5a');
+    for (const [b0, b1, k] of BAYS_OK) s += strip(b0, b1, 3.15, 5.55, '#55565a') + txt((b0 + b1) / 2, 4.6, k === 'bus' ? 'BAIA ÔNIBUS' : 'ESTAC.', 1.0, '#fff');
+    s += strip(uA, uB, innerR, ER, '#cfccc4', 1) + strip(uA, uB, (u) => (ER(u) + innerR(u)) / 2 - 0.2, (u) => (ER(u) + innerR(u)) / 2 + 0.2, '#e6c22c', 2);
+    for (const c of CROSS) { s += strip(c.u - 4.6, c.u + 4.6, -3.65, -3.15, '#55565a'); if (c.type === 'raised') s += strip(c.u - 4.6, c.u + 4.6, -6.15, 3.15, '#6e6f73'); for (let k = -6.0; k < 3.0; k += 0.8) s += strip(c.u - 2, c.u + 2, k, k + 0.4, '#fff', 1); s += txt(c.u, EL(c.u) - 5, c.type === 'signal' ? 'TRAVESSIA SEMAFORIZADA' : 'TRAVESSIA ELEVADA', 1.7, c.type === 'signal' ? '#c8242b' : '#333'); }
+    const cuts = CUTS.map(c => [c[0] - 2, c[1] + 2]); for (const [p0, p1] of subtract(uA, uB, cuts)) s += line(p0, p1, -0.15, '#f0b41c', 0.12) + line(p0, p1, 0.15, '#f0b41c', 0.12) + line(p0, p1, -4.9, '#fff', 0.12, '1 2');
+    for (let u = uA + 4; u < uB - 2; u += 9) { if (inRanges(PL_L, u - 1.5) && inRanges(PL_L, u + 1.5)) s += circ(u, -6.82, 1.6, 'rgba(60,120,50,.55)', '#2f5a24'); if (inRanges(PL_R, u - 1.5) && inRanges(PL_R, u + 1.5)) s += circ(u, 4.45, 1.6, 'rgba(60,120,50,.55)', '#2f5a24'); }
+    for (let u = uA + 6; u < uB - 2; u += 30) s += circ(u, inRanges(PL_L, u) ? -6.75 : EL(u) + 0.4, 0.35, '#f2b233', '#333') + circ(Math.min(uB - 1, u + 15), inRanges(PL_R, u + 15) ? 4.45 : ER(u + 15) - 0.4, 0.35, '#f2b233', '#333');
+    for (const bb of BUS) { const E = bb.side === 'E', o = E ? ER(bb.u) : EL(bb.u), i = E ? innerR(bb.u) : innerL(bb.u); if (Math.abs(o - i) >= 2.9) { const ss = o + (E ? -1 : 1); s += strip(bb.u - 2.2, bb.u + 2.2, ss - 0.8, ss + 0.8, '#2f6fb6'); } }
     s += circ(SIG_U - 6.5, 3.7, 0.5, '#c8242b', '#111') + circ(SIG_U + 6.5, -3.4, 0.5, '#c8242b', '#111');
-    s += txt(SIG_U, -14.5, 'TRAVESSIA SEMAFORIZADA', 1.8, '#c8242b') + txt(CROSS[0].u, -14.5, 'TRAVESSIA ELEVADA', 1.8, '#333') + txt(CROSS[2].u, -14.5, 'TRAVESSIA ELEVADA', 1.8, '#333') + txt(uA - 9, -6, 'PORTAL ZONA 30', 1.8, '#9a4434') + txt(uB + 9, -6, 'PORTAL ZONA 30', 1.8, '#9a4434');
-    const cu = SIG_U + 70; s += txt(cu, -9.1, 'calçada 3,50', 0.9, '#333') + txt(cu, -4.9, 'ciclovia 2,50', 0.9, '#fff') + txt(cu, -1.6, 'faixa 3,00', 0.9, '#fff') + txt(cu, 1.6, 'faixa 3,00', 0.9, '#fff') + txt(cu, 7.1, 'calçada 3,00', 0.9, '#333');
+    s += txt(uA - 9, EL(uA) - 4, 'PORTAL ZONA 30', 1.8, '#9a4434') + txt(uB + 9, EL(uB) - 4, 'PORTAL ZONA 30', 1.8, '#9a4434');
+    for (const cu of [760, 1200, 1520]) s += txt(cu, (EL(cu) + innerL(cu)) / 2, `calçada ${(innerL(cu) - EL(cu)).toFixed(1).replace('.', ',')}`, 0.9, '#333') + txt(cu, -4.9, 'ciclovia 2,50', 0.9, '#fff') + txt(cu, -1.6, 'faixa 3,00', 0.9, '#fff') + txt(cu, 1.6, 'faixa 3,00', 0.9, '#fff') + txt(cu, (ER(cu) + innerR(cu)) / 2, `calçada ${(ER(cu) - innerR(cu)).toFixed(1).replace('.', ',')}`, 0.9, '#333');
   }
   for (const p of POLES) if (p.u > a && p.u < b) s += circ(p.u, p.s, 0.3, '#777');
-  // estaqueamento
-  for (let u = Math.ceil(a / 20) * 20; u <= b; u += 20) { const p0 = at(u, 11.5), p1 = at(u, 13); const [x0, y0] = PX(p0[0], p0[1]), [x1, y1] = PX(p1[0], p1[1]); s += `<line x1="${x0}" y1="${y0}" x2="${x1}" y2="${y1}" stroke="#444" stroke-width="0.15"/>`; if (u % 100 === 0) s += txt(u, 15.6, `Est. ${Math.floor((u - uA) / 20)} (${u - uA} m)`, 1.5, '#444'); }
-  s += txt(a + 5, -30, prop ? 'PLANTA BAIXA — PROPOSTA (conceitual)' : 'PLANTA BAIXA — SITUAÇÃO ATUAL', 3.2, '#111', 'start', 700);
-  s += txt(a + 5, -26, 'PE-060 · Travessia urbana de Ipojuca/PE · sem escala — cotas em metros', 1.8, '#555', 'start', 500);
-  const [nx, ny] = PX(...at(b - 10, -24).slice(0, 2)); s += `<g transform="translate(${nx},${ny})"><polygon points="0,-1.4 5,0 0,1.4" fill="#111"/><text x="7" y="1" font-size="2.6" font-family="Inter" font-weight="700">N</text></g>`;
-  const [sx, sy] = PX(...at(b - 70, -20).slice(0, 2)); s += `<g transform="translate(${sx},${sy})"><rect x="0" y="0" width="25" height="0.8" fill="#111"/><rect x="25" y="0" width="25" height="0.8" fill="#fff" stroke="#111" stroke-width="0.15"/><text x="0" y="3" font-size="1.6" font-family="Inter">0</text><text x="25" y="3" font-size="1.6" font-family="Inter" text-anchor="middle">25</text><text x="50" y="3" font-size="1.6" font-family="Inter" text-anchor="middle">50 m</text></g>`;
-  const pA = at(a, 0), pB = at(b, 0); const xs = [-pA[1], -pB[1]], ys = [pA[0], pB[0]]; const minX = Math.min(...xs) - 10, maxX = Math.max(...xs) + 10, minY = Math.min(...ys) - 40, maxY = Math.max(...ys) + 40;
-  return `<svg id="planSvg" xmlns="http://www.w3.org/2000/svg" viewBox="${minX} ${minY} ${maxX - minX} ${maxY - minY}" preserveAspectRatio="xMidYMid meet"><rect x="${minX - 500}" y="${minY - 500}" width="${maxX - minX + 1000}" height="${maxY - minY + 1000}" fill="#f4f1ea"/>${s}</svg>`;
+  for (let u = Math.ceil(a / 20) * 20; u <= b; u += 20) { const p0 = at(u, ER(u) + 1.5), p1 = at(u, ER(u) + 3); const [x0, y0] = PX(p0[0], p0[1]), [x1, y1] = PX(p1[0], p1[1]); s += `<line x1="${x0}" y1="${y0}" x2="${x1}" y2="${y1}" stroke="#444" stroke-width="0.15"/>`; if (u % 100 === 0) s += txt(u, ER(u) + 6, `${u - uA >= 0 ? '+' : ''}${u - uA} m`, 1.5, '#444'); }
+  const pA = at(a, 0), pB = at(b, 0); const [ax, ay] = PX(pA[0], pA[1]).map(Number), [bx, by] = PX(pB[0], pB[1]).map(Number);
+  let minX = Math.min(ax, bx) - 20, maxX = Math.max(ax, bx) + 20, minY = Infinity, maxY = -Infinity; for (let u = a; u <= b; u += 20) { const p = at(u, 0); const y = +PX(p[0], p[1])[1]; minY = Math.min(minY, y); maxY = Math.max(maxY, y); } minY -= 70; maxY += 70;
+  s += `<text x="${minX + 10}" y="${minY + 14}" font-size="9" font-weight="700" font-family="Inter">${prop ? 'PLANTA BAIXA — PROPOSTA (conceitual)' : 'PLANTA BAIXA — SITUAÇÃO ATUAL'}</text><text x="${minX + 10}" y="${minY + 24}" font-size="5" fill="#555" font-family="Inter">PE-060 · Rodovia Armínio Guilherme dos Santos · Rurópolis, Ipojuca/PE · base: PE3D (MDT/MDE/ortofoto) e eixo SRE DER-PE · cotas em metros</text>`;
+  s += `<g transform="translate(${maxX - 30},${minY + 20}) rotate(${(Math.atan2(-_dir[1], _dir[0]) * 180 / Math.PI).toFixed(1)})"><polygon points="0,-8 3,4 0,1 -3,4" fill="#111"/><text x="0" y="-10" font-size="6" text-anchor="middle" font-family="Inter" font-weight="700">N</text></g>`;
+  s += `<g transform="translate(${maxX - 130},${maxY - 14})"><rect x="0" y="0" width="50" height="1.6" fill="#111"/><rect x="50" y="0" width="50" height="1.6" fill="#fff" stroke="#111" stroke-width="0.3"/><text x="0" y="6" font-size="3.6" font-family="Inter">0</text><text x="50" y="6" font-size="3.6" font-family="Inter" text-anchor="middle">50</text><text x="100" y="6" font-size="3.6" font-family="Inter" text-anchor="middle">100 m</text></g>`;
+  return `<svg id="planSvg" xmlns="http://www.w3.org/2000/svg" viewBox="${minX} ${minY} ${maxX - minX} ${maxY - minY}" preserveAspectRatio="xMidYMid meet"><rect x="${minX - 2000}" y="${minY - 2000}" width="${maxX - minX + 4000}" height="${maxY - minY + 4000}" fill="#f4f1ea"/>${s}</svg>`;
 }
 function planHTML(prop) {
-  const lg = prop ? [['#cfccc4', 'Calçada (piso intertravado)'], ['#e6c22c', 'Piso tátil'], ['#b4554a', 'Ciclovia bidirecional'], ['#55565a', 'Pista (pavimento novo)'], ['#86ad5a', 'Canteiro arborizado'], ['#6e6f73', 'Travessia elevada'], ['#9a4434', 'Pavimento colorido — portal'], ['#2f6fb6', 'Abrigo de ônibus'], ['#f2b233', 'Poste LED'], ['#d4cfc6', 'Edificações']] : [['#8b8b8a', 'Pista existente (~7 m)'], ['#d3a27a', 'Acostamento de terra'], ['#d4cfc6', 'Edificações'], ['#777', 'Postes existentes']];
+  const lg = prop ? [['#cfccc4', 'Calçada (piso intertravado)'], ['#e6c22c', 'Piso tátil'], ['#b4554a', 'Ciclovia bidirecional'], ['#55565a', 'Pista (pavimento novo)'], ['#86ad5a', 'Canteiro arborizado'], ['#6e6f73', 'Travessia elevada'], ['#9a4434', 'Pavimento colorido — portal'], ['#2f6fb6', 'Abrigo de ônibus'], ['#f2b233', 'Poste LED'], ['#d4cfc6', 'Edificações (PE3D)']] : [['#8b8b8a', 'Pista existente (~7 m)'], ['#e2c7a6', 'Faixa lateral até o alinhamento'], ['#d4cfc6', 'Edificações (PE3D)'], ['#777', 'Postes']];
   return `<div id="planSvgWrap">${planSVG(prop)}</div><div class="legend">${lg.map(l => `<span><i style="background:${l[0]}"></i>${l[1]}</span>`).join('')}</div><div class="note">Arraste para mover e use a roda do mouse (ou pinça) para aproximar. Planta gerada a partir do mesmo modelo do 3D: dimensões indicativas, sujeitas a levantamento topográfico e cadastral.</div>`;
 }
 function enablePanZoom() {
   const wrap = $('planSvgWrap'), svg = $('planSvg'); if (!svg) return; let vb = svg.getAttribute('viewBox').split(' ').map(Number); const vb0 = vb.slice();
   // começa ampliado no trecho da travessia semaforizada
-  const p = at(SIG_U, 0); const [cx, cy] = [-p[1], p[0]]; const w0 = 160, h0 = w0 * (wrap.clientHeight / wrap.clientWidth || 0.5); vb = [cx - w0 / 2, cy - h0 / 2, w0, h0]; svg.setAttribute('viewBox', vb.join(' '));
+  const p = at(SIG_U, 0); const [cx, cy] = PX(p[0], p[1]).map(Number); const w0 = 160, h0 = w0 * (wrap.clientHeight / wrap.clientWidth || 0.5); vb = [cx - w0 / 2, cy - h0 / 2, w0, h0]; svg.setAttribute('viewBox', vb.join(' '));
   let drag = null; const pts = new Map();
   wrap.onpointerdown = (e) => { wrap.setPointerCapture(e.pointerId); pts.set(e.pointerId, [e.clientX, e.clientY]); drag = { x: e.clientX, y: e.clientY, vb: vb.slice() }; wrap.style.cursor = 'grabbing'; };
   wrap.onpointermove = (e) => { if (!pts.has(e.pointerId)) return; pts.set(e.pointerId, [e.clientX, e.clientY]); if (pts.size === 2) { const [a2, b2] = [...pts.values()]; const d = Math.hypot(a2[0] - b2[0], a2[1] - b2[1]); if (drag.pd) zoom(drag.pd / d, (a2[0] + b2[0]) / 2, (a2[1] + b2[1]) / 2); drag.pd = d; return; } if (!drag) return; const r = wrap.getBoundingClientRect(); const k = vb[2] / r.width; vb[0] = drag.vb[0] - (e.clientX - drag.x) * k; vb[1] = drag.vb[1] - (e.clientY - drag.y) * k; svg.setAttribute('viewBox', vb.join(' ')); };
@@ -1070,20 +1082,27 @@ function sectionHTML() {
   const lampG = (x, dir) => `<g transform="translate(${X(x)},${Y(0.15)})" stroke="#555" stroke-width="1.2"><line x1="0" y1="0" x2="0" y2="-90"/><line x1="0" y1="-90" x2="${dir * 24}" y2="-90"/><rect x="${dir * 24 - 4}" y="-92" width="8" height="3" fill="#f2b233" stroke="none"/></g>`;
   const hoje = [[-11.8, -3.5, 0, '#d3a27a', 'acost. terra', 0.08], [-3.5, 0, 0, '#8b8b8a', 'faixa 3,50'], [0, 3.5, 0, '#8b8b8a', 'faixa 3,50'], [3.5, 9.9, 0, '#d3a27a', 'acost. terra', 0.08]];
   const prop = [[-11.6, -10.9, 0.45, '#b9b5ac', 'cont.', 0.25], [-10.9, -7.35, 0.15, '#cfccc4', 'calçada'], [-7.35, -6.15, 0.15, '#86ad5a', 'canteiro'], [-6.15, -3.65, 0, '#b4554a', 'ciclovia'], [-3.65, -3.15, 0.13, '#e8e6e0', 'sep.'], [-3.15, 0, 0, '#55565a', 'faixa'], [0, 3.15, 0, '#55565a', 'faixa'], [3.15, 5.55, 0.15, '#86ad5a', 'canteiro/baia'], [5.55, 8.6, 0.15, '#cfccc4', 'calçada'], [8.6, 9.95, 0.15, '#bdb9b0', 'testada']];
+  const svgNote = '';
   const svg = `<svg viewBox="-6 8 700 230" xmlns="http://www.w3.org/2000/svg" style="width:100%;background:#f4f1ea;border-radius:8px"><g transform="translate(0,0)">${sec(hoje, 'SITUAÇÃO ATUAL — ≈ 21,7 m, sem calçadas', 140, [ped(-6), ped(5.5), car(-1.75), car(1.75), bike(4.6)])}</g><g>${sec(prop, 'PROPOSTA — rua completa / Zona 30 (≈ 21,6 m)', 140, [ped(-9.6), ped(-8.2), ped(7), tree(-6.75), tree(4.35), bike(-5.4), bike(-4.4), car(-1.6), car(1.6), lampG(-6.9, 1), lampG(4.5, -1)])}</g></svg>`;
-  return `${svg}<div class="note">Seções-tipo esquemáticas (ampliação vertical 1:1). Oeste à esquerda (encosta / Alto São João), leste à direita (comércio). Cotas em metros, indicativas — a confirmar com levantamento planialtimétrico, cadastro de lotes e projeto executivo. Cores: concreto/piso intertravado (cinza claro), ciclovia (vermelho), pista (cinza escuro), canteiros (verde).</div>
+  return `${svg}<div class="note"><b>Larguras variam ao longo do trecho:</b> a calçada vai até o alinhamento real das edificações (medido no PE3D) e o canteiro é suprimido nos trechos estreitos (ex.: estacas 1.480–1.600). Seções-tipo esquemáticas (ampliação vertical 1:1). Oeste à esquerda (encosta / Alto São João), leste à direita (comércio). Cotas em metros, indicativas — a confirmar com levantamento planialtimétrico, cadastro de lotes e projeto executivo. Cores: concreto/piso intertravado (cinza claro), ciclovia (vermelho), pista (cinza escuro), canteiros (verde).</div>
   <table class="q" style="margin-top:10px"><tr><th>Elemento</th><th>Hoje</th><th>Proposta</th></tr>
   <tr><td>Faixas de rolamento</td><td>2 × 3,50 m</td><td>2 × 3,00 m</td></tr><tr><td>Velocidade regulamentada</td><td>60 km/h</td><td>30 km/h (Zona 30)</td></tr>
   <tr><td>Calçadas</td><td>inexistentes</td><td>3,50 m (O) e 3,00 m (L), com piso tátil</td></tr><tr><td>Ciclovia</td><td>inexistente</td><td>bidirecional 2,50 m + separador 0,50 m</td></tr>
   <tr><td>Travessias</td><td>sem proteção</td><td>1 semaforizada + 2 elevadas</td></tr><tr><td>Drenagem</td><td>superficial, sem meio-fio</td><td>meio-fio, sarjeta e rede tubular</td></tr></table>`;
 }
 function quantHTML() {
-  const len = uB - uA, cutL = CROSS.length * 9.2; const bayL = BAYS.reduce((a, b) => a + (b[1] - b[0]), 0);
-  let trees = 0; for (const side of ['W', 'E']) for (let u = uA + 4; u < uB - 2; u += 9) { if (CUTS.some(c => u > c[0] - 1.5 && u < c[1] + 1.5)) continue; if (side === 'E' && BAYS.some(b => u > b[0] - 1 && u < b[1] + 1)) continue; trees++; }
-  let leds = 0, pedL = 0; for (let u = uA + 6; u < uB - 2; u += 30) { if (CUTS.some(c => Math.abs(u - (c[0] + c[1]) / 2) < 6)) continue; leds += 2; pedL += 2; } leds += CROSS.length * 2;
+  const len = uB - uA; let swL = 0, swR = 0, trees = 0, leds = 0, pedL = 0, shelters = 0, narrow = 0;
+  for (let u = uA; u < uB; u += 1) { swL += innerL(u) - EL(u); swR += ER(u) - innerR(u); if (!inRanges(PL_L, u) && EL(u) > -9.6) narrow++; }
+  for (const c of CUTS) { swL += 0; }
+  for (let u = uA + 4; u < uB - 2; u += 9) { if (inRanges(PL_L, u - 1.5) && inRanges(PL_L, u + 1.5)) trees++; if (inRanges(PL_R, u - 1.5) && inRanges(PL_R, u + 1.5)) trees++; }
+  for (let u = uA + 6; u < uB - 2; u += 30) { if (CUTS.some(c => Math.abs(u - (c[0] + c[1]) / 2) < 6)) continue; leds += 2; pedL += 2; } leds += CROSS.length * 2;
+  for (const b of BUS) { const E = b.side === 'E'; if (Math.abs((E ? ER(b.u) : EL(b.u)) - (E ? innerR(b.u) : innerL(b.u))) >= 2.9) shelters++; }
+  const plA = PL_L.reduce((a, r) => a + (r[1] - r[0]) * 1.2, 0) + PL_R.reduce((a, r) => a + (r[1] - r[0]) * 2.4, 0);
+  const bayL = BAYS_OK.reduce((a, b) => a + (b[1] - b[0]), 0); const cutL = CROSS.length * 9.2;
   const f = (n, d = 0) => n.toLocaleString('pt-BR', { maximumFractionDigits: d, minimumFractionDigits: d });
-  const rows = [['Extensão tratada (travessia urbana)', f(len), 'm'], ['Pavimento novo da pista (fresagem + recapeamento)', f(6.3 * len), 'm²'], ['Calçadas em piso intertravado', f(3.55 * len + 3.05 * len + 2 * 1.2 * 9.2 * CROSS.length), 'm²'], ['Piso tátil direcional/alerta', f(0.4 * 2 * len + 0.4 * 2 * cutL), 'm²'], ['Ciclovia bidirecional (2,50 m)', f(len), 'm'], ['Separador físico da ciclovia', f(len - cutL), 'm'], ['Meio-fio de concreto', f(2 * (len - cutL) + (len - cutL - bayL) + bayL + 2 * (len - cutL)), 'm'], ['Canteiros arborizados', f(1.2 * (len - cutL) + 2.4 * (len - cutL - bayL)), 'm²'], ['Árvores (oiti / ipê-amarelo)', f(trees), 'un'], ['Postes LED veiculares', f(leds), 'un'], ['Luminárias pedonais', f(pedL), 'un'], ['Travessias elevadas', '2', 'un'], ['Travessia semaforizada c/ botoeira', '1', 'un'], ['Abrigos de ônibus', f(BUS.length), 'un'], ['Baias (ônibus / estacionamento)', f(bayL), 'm'], ['Portais de entrada Zona 30', '2', 'un'], ['Muro de contenção do talude (lado oeste)', f(len), 'm']];
-  return `<table class="q"><tr><th>Item</th><th>Quantidade</th></tr>${rows.map(r => `<tr><td>${r[0]}</td><td>${r[1]} ${r[2]}</td></tr>`).join('')}</table><div class="note">Quantitativos <b>indicativos</b>, extraídos automaticamente da geometria do modelo conceitual (extensão de ${f(len)} m entre os portais). Servem para dimensionar a ordem de grandeza da intervenção e não substituem orçamento nem projeto executivo.</div>`;
+  const nRaised = CROSS.filter(c => c.type === 'raised').length;
+  const rows = [['Extensão tratada (estaca ' + uA + ' a ' + uB + ')', f(len), 'm'], ['Pavimento novo da pista (fresagem + recapeamento, 6,30 m)', f(6.3 * len), 'm²'], ['Calçadas em piso intertravado (até o alinhamento real)', f(swL + swR), 'm²'], ['Largura média das calçadas (NO / SE)', f(swL / len, 1) + ' / ' + f(swR / len, 1), 'm'], ['Piso tátil direcional', f(0.4 * 2 * len), 'm²'], ['Ciclovia bidirecional (2,50 m)', f(len), 'm'], ['Separador físico da ciclovia', f(len - cutL), 'm'], ['Meio-fio de concreto', f(2 * (len - cutL) + bayL * 2), 'm'], ['Canteiros arborizados', f(plA), 'm²'], ['Árvores novas (oiti / ipê-amarelo)', f(trees), 'un'], ['Postes LED veiculares', f(leds), 'un'], ['Luminárias pedonais', f(pedL), 'un'], ['Travessias elevadas', f(nRaised), 'un'], ['Travessia semaforizada c/ botoeira', '1', 'un'], ['Abrigos de ônibus', f(shelters), 'un'], ['Baias (ônibus / estacionamento)', f(bayL), 'm'], ['Portais de entrada Zona 30', '2', 'un'], ['Trechos estreitos sem canteiro (lado NO)', f(narrow), 'm']];
+  return `<table class="q"><tr><th>Item</th><th>Quantidade</th></tr>${rows.map(r => `<tr><td>${r[0]}</td><td>${r[1]} ${r[2]}</td></tr>`).join('')}</table><div class="note">Quantitativos <b>indicativos</b>, calculados sobre a geometria do modelo: eixo real corrigido pela ortofoto PE3D, larguras limitadas pelo alinhamento das edificações extraído do MDE − MDT. Não substituem levantamento topográfico, cadastro de lotes, orçamento nem projeto executivo.</div>`;
 }
 // referências → vistas equivalentes
 document.querySelectorAll('[data-goto]').forEach(b => b.onclick = () => { const [cam, ph] = b.dataset.goto.split('-'); $('mRefs').classList.remove('show'); stopPres(); setPhase(ph); setCam(cam); });
@@ -1093,8 +1112,12 @@ $('bQR').onclick = () => { $('qrBox').innerHTML = QR_URL ? `<img src="img/qr.png
 
 // ============================================================ Inicialização
 addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
-function init() {
-  ldTxt.textContent = 'terreno, edificações e vegetação'; const shared = buildShared(); scene.add(shared);
+async function init() {
+  ldTxt.textContent = 'ortofoto PE3D';
+  ORTHO_TEX = await new THREE.TextureLoader().loadAsync('data/orto.jpg'); ORTHO_TEX.colorSpace = THREE.SRGBColorSpace; ORTHO_TEX.anisotropy = ANISO; ORTHO_TEX.generateMipmaps = true;
+  M.ortho.map = ORTHO_TEX; M.orthoRoof.map = ORTHO_TEX; M.ortho.needsUpdate = M.orthoRoof.needsUpdate = true;
+  ldTxt.textContent = 'terreno (MDT PE3D)'; await new Promise(r => setTimeout(r, 20));
+  const shared = buildShared(); scene.add(shared);
   winLitMeshes = []; shared.traverse(o => { if (o.name === 'winLit') winLitMeshes.push(o); });
   buildPhase(); syncUI(); setCam('aerea', true);
   seedAgents(); updateEnvironment(0.016);
@@ -1110,4 +1133,4 @@ function init() {
   window.__ready = true;
 }
 window.__app = { state, setPhase, setCam, showStep, updateAgents, buildPhase, syncUI, camera, controls, renderer, scene, flyTo, openPlan };
-setTimeout(() => { try { init(); } catch (e) { console.error(e); ldTxt.textContent = 'Erro: ' + e.message; } }, 30);
+setTimeout(() => { init().catch(e => { console.error(e); ldTxt.textContent = 'Erro: ' + e.message; }); }, 30);
